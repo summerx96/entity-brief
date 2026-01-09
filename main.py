@@ -311,6 +311,20 @@ class EntityBrief(AddOn):
             "failures": failures,
         }
 
+        # ---- Render HTML ----
+        self.set_message("Generating HTML report...")
+        html_report = self._render_html(report_data)
+        filename = f"entity-brief-{run_uuid}.html"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(html_report)
+
+        # Attach report to add-on run (one file per run)
+        with open(filename, "rb") as f:
+            self.upload_file(f)
+
+        self.set_progress(100)
+        self.set_message("Done. Report uploaded.")
+
     def _render_html(self, data: Dict[str, Any]) -> str:
         # Embed data as JSON so the report is one file
         data_json = json.dumps(data, ensure_ascii=False)
