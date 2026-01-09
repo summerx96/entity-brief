@@ -311,6 +311,150 @@ class EntityBrief(AddOn):
             "failures": failures,
         }
 
+    def _render_html(self, data: Dict[str, Any]) -> str:
+        # Embed data as JSON so the report is one file
+        data_json = json.dumps(data, ensure_ascii=False)
+        run = data["run"]
+        meta = data["meta"]
+        feedback_url = meta.get("feedback_url") or ""
+        feedback_block = ""
+        if feedback_url:
+            feedback_block = f"""
+        <p class="small">
+          Feedback form: <a href="{_escape(feedback_url)}">{_escape(feedback_url)}</a>
+        </p>"""
+
+        # Note: we keep D3 via CDN for MVP. If you want fully offline reports, embed d3.v7.min.js later.
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Entity Brief - {html.escape(run["uuid"])}</title>
+  <script src="{D3_CDN}"></script>
+  <style>
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; line-height: 1.4; }}
+    .muted {{ color: #555; }}
+    .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }}
+    .row {{ display: flex; gap: 16px; flex-wrap: wrap; }}
+    .row > .card {{ flex: 1 1 360px; }}
+    .btn {{ display: inline-block; padding: 8px 10px; border: 1px solid #888; border-radius: 8px; text-decoration: none; color: inherit; }}
+    code {{ background: #f6f6f6; padding: 2px 4px; border-radius: 4px; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    th, td {{ border-bottom: 1px solid #eee; padding: 6px 8px; vertical-align: top; }}
+    th {{ text-align: left; }}
+    details summary {{ cursor: pointer; }}
+    .small {{ font-size: 0.9em; }}
+    .warn {{ background: #fff6e5; border-color: #ffd28a; }}
+  </style>
+</head>
+<body>
+  <h1>Entity Brief</h1>
+  <p class="muted">Cross-document entity index + connection cues for FOIA / investigative work.</p>
+
+  <div class="card">
+    <h2>Run Certificate</h2>
+    <p class="small">
+      <strong>Run UUID:</strong> <code id="runUuid">{_escape(run["uuid"])}</code><br/>
+      <strong>Version:</strong> <code>{_escape(run["version"])}</code><br/>
+      <strong>Docs processed:</strong> {run["docs_processed"]} &nbsp; | &nbsp;
+      <strong>Pages processed:</strong> {run["pages_processed"]} &nbsp; | &nbsp;
+      <strong>Unique entities:</strong> {run["unique_entities"]} &nbsp; | &nbsp;
+      <strong>Runtime:</strong> {run["runtime_seconds"]}s
+    </p>
+
+    <div class="row">
+      <div class="card">
+        <h3>Share (optional)</h3>
+        <p class="small">
+          If you found this useful, you can send the summary to the developer (helps improve the tool and supports impact documentation).
+        </p>
+        <p>
+          <a class="btn" href="#" id="copyBtn">Copy run summary</a>
+          &nbsp;
+          <a class="btn" id="mailtoLink" href="#">Email summary to developer</a>
+        </p>
+        {feedback_block}
+      </div>
+
+      <div class="card warn">
+        <h3>Privacy / trust notes</h3>
+        <ul class="small">
+          <li>This report is generated from the documents selected for this run.</li>
+          <li>By default, no document text is sent to any external service by this Add-On.</li>
+          <li>This version does not send usage metrics.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h2>Top Entities (by document coverage)</h2>
+      <svg id="barChart" width="900" height="380"></svg>
+      <p class="small muted">Bars show how many documents mention each entity (top list).</p>
+    </div>
+
+    <div class="card">
+      <h2>Top Connections (co-occurrence)</h2>
+      <div id="connections"></div>
+      <p class="small muted">Pairs that appear together across the same documents (ranked by doc count).</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Entity Index</h2>
+    <p class="small muted">
+      Expand an entity to see which documents/pages it appears in.
+    </p>
+    <div id="entityIndex"></div>
+  </div>
+
+  <div class="card">
+    <h2>Failures / missing entities</h2>
+    <div id="failures"></div>
+  </div>
+
+  <script id="data" type="application/json">{html.escape(data_json)}</script>
+  <script>
+    const DATA = JSON.parse(document.getElementById("data").textContent);
+
+    // ---- Share helpers ----
+    function runSummaryText() {{
+      const r = DATA.run;
+      return [
+        "Entity Brief - Run Summary",
+        `Run UUID: ${{r.uuid}}`,
+        `Version: ${{r.version}}`,
+        `Docs processed: ${{r.docs_processed}}`,
+        `Pages processed: ${{r.pages_processed}}`,
+        `Unique entities: ${{r.unique_entities}}`,
+        `Runtime (s): ${{r.runtime_seconds}}`,
+        "",
+        "Optional (if you're willing):",
+        "- What newsroom/org are you with?",
+        "- What did this help you find faster?",
+        "- Approx. minutes saved?"
+      ].join("\\n");
+    }}
+
+    document.getElementById("copyBtn").addEventListener("click", async (e) => {{
+      e.preventDefault();
+      try {{
+        await navigator.clipboard.writeText(runSummaryText());
+        alert("Copied run summary to clipboard.");
+      }} catch (err) {{
+        alert("Copy failed (browser permission). You can manually select text in the Run Certificate block.");
+      }}
+    }});
+
+    const feedbackLine = DATA.meta.feedback_url ? "\\n\\nFeedback form: " + DATA.meta.feedback_url : "";
+    const mailto = `mailto:${{encodeURIComponent(DATA.meta.developer_email)}}?subject=${{encodeURIComponent("Entity Brief feedback (" + DATA.run.uuid + ")")}}&body=${{encodeURIComponent(runSummaryText() + feedbackLine)}}`;
+    document.getElementById("mailtoLink").setAttribute("href", mailto);
+  </script>
+</body>
+</html>"""
+
 
 if __name__ == "__main__":
     EntityBrief().main()
