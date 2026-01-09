@@ -20,5 +20,10 @@ and produces a single HTML report with:
 - `ENTITY_BRIEF_DEV_EMAIL`: used for the mailto link in the report (default: `summerxie966@gmail.com`).
 - `ENTITY_BRIEF_FEEDBACK_URL`: leave unset for now (feedback form disabled in this version).
 
+## GitHub Actions
+- Workflow: `.github/workflows/addon.yml`
+- Triggered by `repository_dispatch` (`documentcloud-addon-run`) or manual `workflow_dispatch`.
+- Timeout is set to 15 minutes; adjust `timeout-minutes` if needed.
+
 ## Local testing (example)
 python main.py --username "$DC_USERNAME" --password "$DC_PASSWORD" --documents 123 456 --data '{"max_docs": 25, "min_relevance": 0.15}'
