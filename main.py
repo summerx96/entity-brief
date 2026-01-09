@@ -451,6 +451,93 @@ class EntityBrief(AddOn):
     const feedbackLine = DATA.meta.feedback_url ? "\\n\\nFeedback form: " + DATA.meta.feedback_url : "";
     const mailto = `mailto:${{encodeURIComponent(DATA.meta.developer_email)}}?subject=${{encodeURIComponent("Entity Brief feedback (" + DATA.run.uuid + ")")}}&body=${{encodeURIComponent(runSummaryText() + feedbackLine)}}`;
     document.getElementById("mailtoLink").setAttribute("href", mailto);
+
+    // ---- Bar chart (D3) ----
+    const top = (DATA.top_entities || []).slice(0, 15).map(d => ({{
+      name: d.name,
+      kind: d.kind,
+      doc_count: d.doc_count,
+      total_mentions: d.total_mentions
+    }}));
+
+    const svg = d3.select("#barChart");
+    const width = +svg.attr("width");
+    const height = +svg.attr("height");
+    const margin = {{top: 20, right: 20, bottom: 120, left: 60}};
+    const innerW = width - margin.left - margin.right;
+    const innerH = height - margin.top - margin.bottom;
+
+    const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
+
+    const x = d3.scaleBand()
+      .domain(top.map(d => d.name))
+      .range([0, innerW])
+      .padding(0.15);
+
+    const y = d3.scaleLinear()
+      .domain([0, d3.max(top, d => d.doc_count) || 1])
+      .nice()
+      .range([innerH, 0]);
+
+    g.append("g")
+      .attr("transform", `translate(0,${{innerH}})`)
+      .call(d3.axisBottom(x))
+      .selectAll("text")
+        .attr("transform", "rotate(-40)")
+        .style("text-anchor", "end");
+
+    g.append("g").call(d3.axisLeft(y).ticks(6));
+
+    g.selectAll("rect")
+      .data(top)
+      .enter()
+      .append("rect")
+        .attr("x", d => x(d.name))
+        .attr("y", d => y(d.doc_count))
+        .attr("width", x.bandwidth())
+        .attr("height", d => innerH - y(d.doc_count));
+
+    // ---- Connections list ----
+    const edges = (DATA.edges || []).slice(0, 20);
+    const connDiv = document.getElementById("connections");
+    if (!edges.length) {{
+      connDiv.innerHTML = "<p class='muted small'>No connections computed (or not enough entities).</p>";
+    }} else {{
+      let html = "<table><thead><tr><th>Entity A</th><th>Entity B</th><th># Docs together</th></tr></thead><tbody>";
+      for (const e of edges) {{
+        html += `<tr><td>${{e.a}}</td><td>${{e.b}}</td><td>${{e.doc_count}}</td></tr>`;
+      }}
+      html += "</tbody></table>";
+      connDiv.innerHTML = html;
+    }}
+
+    // ---- Entity index ----
+    const idx = document.getElementById("entityIndex");
+    const ents = (DATA.entities || []).slice(0, 200);
+    idx.innerHTML = ents.map(ent => {{
+      const docs = (ent.docs || []).map(d => {{
+        const pages = (d.pages || []).map(p => `p${{p}}`).join(", ");
+        const samples = (d.samples || []).slice(0, 2).map(s => `<div class="muted small">...${{s}}...</div>`).join("");
+        const link = d.url ? `<a href="${{d.url}}" target="_blank" rel="noreferrer">${{d.title}}</a>` : d.title;
+        return `<div class="small"><strong>${{link}}</strong> - mentions: ${{d.count}}${{pages ? " - pages: " + pages : ""}}${{samples}}</div>`;
+      }}).join("");
+      return `
+        <details class="card">
+          <summary><strong>${{ent.name}}</strong> <span class="muted">(${{ent.kind}})</span> - docs: <strong>${{ent.doc_count}}</strong>, mentions: <strong>${{ent.total_mentions}}</strong></summary>
+          <div class="small muted">Aliases (sample): ${{(ent.aliases||[]).slice(0,10).join(", ")}}</div>
+          <div style="margin-top:8px;">${{docs || "<div class='muted small'>No doc details</div>"}}</div>
+        </details>
+      `;
+    }}).join("");
+
+    // ---- Failures ----
+    const fDiv = document.getElementById("failures");
+    const fails = DATA.failures || [];
+    if (!fails.length) {{
+      fDiv.innerHTML = "<p class='muted small'>No failures recorded.</p>";
+    }} else {{
+      fDiv.innerHTML = "<pre class='small'>" + JSON.stringify(fails, null, 2) + "</pre>";
+    }}
   </script>
 </body>
 </html>"""
