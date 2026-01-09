@@ -38,6 +38,56 @@ def _safe_float(x: Any, default: float) -> float:
         return default
 
 
+def _get_access_token(addon: AddOn) -> str:
+    """
+    DocumentCloud API uses an access token placed in Authorization: Bearer <token>.
+    This function tries common locations that AddOn implementations tend to store it.
+    """
+    for attr in ("access_token", "token"):
+        tok = getattr(addon, attr, None)
+        if tok:
+            return tok
+    client = getattr(addon, "client", None)
+    if client:
+        for attr in ("access_token", "token"):
+            tok = getattr(client, attr, None)
+            if tok:
+                return tok
+    # Last resort: env (useful for local testing)
+    tok = os.environ.get("DC_ACCESS_TOKEN") or os.environ.get("DOCUMENTCLOUD_ACCESS_TOKEN")
+    if tok:
+        return tok
+    raise RuntimeError("Could not locate a DocumentCloud access token.")
+
+
+def _api_get_json(url: str, token: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _api_get_all_pages(url: str, token: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """
+    Handle DRF-style pagination: {results: [...], next: url}
+    """
+    out: List[Dict[str, Any]] = []
+    next_url = url
+    next_params = dict(params or {})
+    while next_url:
+        payload = _api_get_json(next_url, token, params=next_params)
+        if isinstance(payload, dict) and "results" in payload:
+            out.extend(payload.get("results", []))
+            next_url = payload.get("next")
+            next_params = {}  # next already includes query params
+        elif isinstance(payload, list):
+            out.extend(payload)
+            break
+        else:
+            break
+    return out
+
+
 class EntityBrief(AddOn):
     def main(self):
         start_ts = time.time()
@@ -76,6 +126,27 @@ class EntityBrief(AddOn):
             self.set_progress(int(i / max(len(docs), 1) * 10))
 
         self.set_message(f"Collected {len(docs)} documents.")
+
+        # ---- Extract entities per doc ----
+        token = _get_access_token(self)
+        self.set_message(f"Fetching entities for {len(docs)} documents...")
+        doc_entities: Dict[int, List[Dict[str, Any]]] = {}
+        failures: List[Dict[str, Any]] = []
+
+        for i, doc in enumerate(docs, start=1):
+            try:
+                doc_id = int(getattr(doc, "id"))
+                url = f"{API_BASE}documents/{doc_id}/entities/"
+                params = {
+                    "expand": "occurrences",
+                    "relevance__gt": min_rel,
+                }
+                ents = _api_get_all_pages(url, token, params=params)
+                doc_entities[doc_id] = ents
+                self.set_progress(10 + int(i / max(len(docs), 1) * 30))
+            except Exception as e:
+                failures.append({"doc_id": getattr(doc, "id", None), "error": str(e)})
+                continue
 
 
 if __name__ == "__main__":
