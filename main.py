@@ -88,6 +88,40 @@ def _api_get_all_pages(url: str, token: str, params: Optional[Dict[str, Any]] = 
     return out
 
 
+def _normalize_name(s: str) -> str:
+    s = s.strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    # Keep letters/numbers/basic punctuation; remove noisy quotes
+    s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
+    return s
+
+
+def _entity_key(ent: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Best-effort canonicalization:
+    - Prefer stable IDs if present (mid/wiki_url)
+    - Else normalized surface form
+    """
+    kind = str(ent.get("kind", "Other"))
+    # Common fields from entity systems (may/may not exist depending on extractor)
+    mid = ent.get("mid") or ent.get("knowledge_graph_mid")
+    wiki = ent.get("wiki_url") or ent.get("wikipedia_url")
+    if mid:
+        return (kind, f"mid:{mid}")
+    if wiki:
+        return (kind, f"wiki:{wiki}")
+    val = str(ent.get("value") or ent.get("name") or "")
+    return (kind, f"v:{_normalize_name(val)}")
+
+
+def _entity_display(ent: Dict[str, Any]) -> str:
+    return str(ent.get("value") or ent.get("name") or "").strip()
+
+
+def _escape(s: str) -> str:
+    return html.escape(s or "", quote=True)
+
+
 class EntityBrief(AddOn):
     def main(self):
         start_ts = time.time()
@@ -147,6 +181,93 @@ class EntityBrief(AddOn):
             except Exception as e:
                 failures.append({"doc_id": getattr(doc, "id", None), "error": str(e)})
                 continue
+
+        # ---- Build cross-doc clusters ----
+        self.set_message("Normalizing and aggregating entities...")
+        clusters: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Per-doc canonical set for co-occurrence
+        doc_entity_keys: Dict[int, List[Tuple[str, str]]] = {}
+
+        for doc_id, ents in doc_entities.items():
+            keys_for_doc = []
+            for ent in ents:
+                try:
+                    kind = str(ent.get("kind", "Other"))
+                    display = _entity_display(ent)
+                    if not display:
+                        continue
+
+                    key = _entity_key(ent)
+                    keys_for_doc.append(key)
+
+                    c = clusters.get(key)
+                    if not c:
+                        clusters[key] = {
+                            "kind": kind,
+                            "canonical_key": f"{key[0]}::{key[1]}",
+                            "display_names": Counter(),
+                            "aliases": set(),
+                            "total_mentions": 0,
+                            "doc_count": 0,
+                            "docs": {},  # doc_id -> {count, pages:set, samples:[]}
+                        }
+                        c = clusters[key]
+
+                    c["display_names"][display] += 1
+                    c["aliases"].add(display)
+
+                    count = int(ent.get("count") or 0)
+                    c["total_mentions"] += count
+
+                    if doc_id not in c["docs"]:
+                        c["docs"][doc_id] = {"count": 0, "pages": set(), "samples": []}
+                        c["doc_count"] += 1
+
+                    c["docs"][doc_id]["count"] += count
+
+                    # Occurrences may include page/context; best-effort
+                    occs = ent.get("occurrences") or []
+                    for occ in occs[:5]:
+                        page = occ.get("page")
+                        if isinstance(page, int):
+                            c["docs"][doc_id]["pages"].add(page)
+                        snippet = occ.get("context") or occ.get("snippet") or ""
+                        if snippet:
+                            c["docs"][doc_id]["samples"].append(str(snippet)[:200])
+
+                except Exception:
+                    continue
+
+            doc_entity_keys[doc_id] = keys_for_doc
+
+        # Finalize cluster display name
+        cluster_list: List[Dict[str, Any]] = []
+        for key, c in clusters.items():
+            display = c["display_names"].most_common(1)[0][0] if c["display_names"] else key[1]
+            # JSON-ify sets/counters
+            docs_out = []
+            for did, dd in c["docs"].items():
+                meta = doc_meta.get(did, {"id": did, "title": f"Document {did}", "url": ""})
+                docs_out.append({
+                    "doc_id": did,
+                    "title": meta["title"],
+                    "url": meta["url"],
+                    "count": dd["count"],
+                    "pages": sorted(list(dd["pages"]))[:25],
+                    "samples": dd["samples"][:5],
+                })
+            docs_out.sort(key=lambda x: (-x["count"], x["title"]))
+
+            cluster_list.append({
+                "kind": c["kind"],
+                "name": display,
+                "aliases": sorted(list(c["aliases"]))[:25],
+                "total_mentions": c["total_mentions"],
+                "doc_count": c["doc_count"],
+                "docs": docs_out[:10],  # cap
+            })
+
+        cluster_list.sort(key=lambda x: (-x["doc_count"], -x["total_mentions"], x["name"].lower()))
 
 
 if __name__ == "__main__":
