@@ -269,6 +269,48 @@ class EntityBrief(AddOn):
 
         cluster_list.sort(key=lambda x: (-x["doc_count"], -x["total_mentions"], x["name"].lower()))
 
+        # ---- Connections (co-occurrence) ----
+        edges: List[Dict[str, Any]] = []
+        if include_connections:
+            self.set_message("Computing co-occurrence connections...")
+            pair_counts = Counter()
+            for did, keys in doc_entity_keys.items():
+                # Use only top entities per doc to avoid combinatorial blowup
+                unique = list(dict.fromkeys(keys))  # stable unique
+                unique = unique[:25]
+                for a, b in itertools.combinations(sorted(unique), 2):
+                    pair_counts[(a, b)] += 1
+            for (a, b), dc in pair_counts.most_common(50):
+                a_name = clusters.get(a, {}).get("display_names", Counter()).most_common(1)
+                b_name = clusters.get(b, {}).get("display_names", Counter()).most_common(1)
+                edges.append({
+                    "a": a_name[0][0] if a_name else a[1],
+                    "b": b_name[0][0] if b_name else b[1],
+                    "doc_count": dc,
+                })
+
+        # ---- Build report data ----
+        runtime_s = round(time.time() - start_ts, 2)
+        report_data = {
+            "run": {
+                "uuid": run_uuid,
+                "version": ADDON_VERSION,
+                "runtime_seconds": runtime_s,
+                "docs_processed": len(docs),
+                "pages_processed": total_pages,
+                "unique_entities": len(cluster_list),
+                "generated_at_epoch": int(time.time()),
+            },
+            "meta": {
+                "feedback_url": FEEDBACK_URL,
+                "developer_email": DEVELOPER_EMAIL,
+            },
+            "top_entities": cluster_list[: max(top_n, 5)],
+            "entities": cluster_list[:500],
+            "edges": edges,
+            "failures": failures,
+        }
+
 
 if __name__ == "__main__":
     EntityBrief().main()
