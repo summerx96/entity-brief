@@ -47,3 +47,4 @@ Update this table after each verification run.
 | 2026-01-13 | 26469884 | partial | public doc had no entities; verified Skipped section |
 | 2026-01-13 | 26301227, 25943454, 25943453, 25943452 | pass | entities present; demo report regenerated (unique_entities: 62) |
 | 2026-01-14 | 26301227, 25943454, 25943453, 25943452 | pass | regenerated demo report locally and verified charts in browser |
+| 2026-01-14 | 26301227, 25943454, 25943453, 25943452 | pass | demo report regenerated with static image fallbacks |

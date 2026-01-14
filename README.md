@@ -18,8 +18,12 @@ A DocumentCloud Add-On that aggregates extracted entities across documents into 
 
 Sample report: `docs/demo/entity-brief-demo.html`
 
-![Top entities chart](docs/demo/screenshot-top-entities.png)
-![Entity index](docs/demo/screenshot-entity-index.png)
+<p>
+  <img src="docs/demo/screenshot-top-entities.png" width="900" alt="Top entities chart" />
+</p>
+<p>
+  <img src="docs/demo/screenshot-entity-index.png" width="900" alt="Entity index" />
+</p>
 
 ## What it does
 

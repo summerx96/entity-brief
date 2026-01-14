@@ -389,6 +389,20 @@ class EntityBrief(AddOn):
         data_json = json.dumps(data, ensure_ascii=False)
         run = data["run"]
         meta = data["meta"]
+        demo_mode = str(run.get("uuid", "")).startswith("demo")
+        demo_chart_fallback = ""
+        demo_index_fallback = ""
+        if demo_mode:
+            demo_chart_fallback = """
+      <div id="chartFallback" class="small muted" style="margin: 8px 0;">
+        <p class="muted">Demo preview (static image shown if JS/D3 is blocked):</p>
+        <img src="screenshot-top-entities.png" alt="Top entities chart preview" style="width: 100%; max-width: 900px; border: 1px solid #eee; border-radius: 8px;" />
+      </div>"""
+            demo_index_fallback = """
+      <div id="indexFallback" class="small muted" style="margin: 8px 0;">
+        <p class="muted">Demo preview (static image shown if JS is blocked):</p>
+        <img src="screenshot-entity-index.png" alt="Entity index preview" style="width: 100%; max-width: 900px; border: 1px solid #eee; border-radius: 8px;" />
+      </div>"""
 
         # Note: we keep D3 via CDN for MVP. If you want fully offline reports, embed d3.v7.min.js later.
         return f"""<!doctype html>
@@ -456,6 +470,7 @@ class EntityBrief(AddOn):
   <div class="row">
     <div class="card">
       <h2>Top Entities (by document coverage)</h2>
+      {demo_chart_fallback}
       <svg id="barChart" width="900" height="380"></svg>
       <p class="small muted">Bars show how many documents mention each entity (top list).</p>
     </div>
@@ -472,6 +487,7 @@ class EntityBrief(AddOn):
     <p class="small muted">
       Expand an entity to see which documents/pages it appears in.
     </p>
+    {demo_index_fallback}
     <div id="entityIndex"></div>
   </div>
 
@@ -511,6 +527,9 @@ class EntityBrief(AddOn):
       }}
       return "";
     }}
+
+    const demoChartFallback = document.getElementById("chartFallback");
+    const demoIndexFallback = document.getElementById("indexFallback");
 
     // ---- Share helpers ----
     function runSummaryText() {{
@@ -552,42 +571,63 @@ class EntityBrief(AddOn):
       total_mentions: d.total_mentions
     }}));
 
-    const svg = d3.select("#barChart");
-    const width = +svg.attr("width");
-    const height = +svg.attr("height");
-    const margin = {{top: 20, right: 20, bottom: 120, left: 60}};
-    const innerW = width - margin.left - margin.right;
-    const innerH = height - margin.top - margin.bottom;
+    const chartSvg = document.getElementById("barChart");
+    const hasD3 = typeof d3 !== "undefined";
+    if (!hasD3) {{
+      if (!demoChartFallback && chartSvg) {{
+        const note = document.createElement("p");
+        note.className = "small muted";
+        note.textContent = "Chart could not render (D3 failed to load).";
+        chartSvg.insertAdjacentElement("beforebegin", note);
+      }}
+    }} else if (chartSvg) {{
+      if (demoChartFallback) {{
+        demoChartFallback.style.display = "none";
+      }}
+      if (!top.length) {{
+        const note = document.createElement("p");
+        note.className = "small muted";
+        note.textContent = "No entities available for chart.";
+        chartSvg.insertAdjacentElement("beforebegin", note);
+      }} else {{
+        const svg = d3.select(chartSvg);
+        const width = +svg.attr("width");
+        const height = +svg.attr("height");
+        const margin = {{top: 20, right: 20, bottom: 120, left: 60}};
+        const innerW = width - margin.left - margin.right;
+        const innerH = height - margin.top - margin.bottom;
 
-    const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
+        const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
 
-    const x = d3.scaleBand()
-      .domain(top.map(d => d.name))
-      .range([0, innerW])
-      .padding(0.15);
+        const x = d3.scaleBand()
+          .domain(top.map(d => d.name))
+          .range([0, innerW])
+          .padding(0.15);
 
-    const y = d3.scaleLinear()
-      .domain([0, d3.max(top, d => d.doc_count) || 1])
-      .nice()
-      .range([innerH, 0]);
+        const y = d3.scaleLinear()
+          .domain([0, d3.max(top, d => d.doc_count) || 1])
+          .nice()
+          .range([innerH, 0]);
 
-    g.append("g")
-      .attr("transform", `translate(0,${{innerH}})`)
-      .call(d3.axisBottom(x))
-      .selectAll("text")
-        .attr("transform", "rotate(-40)")
-        .style("text-anchor", "end");
+        g.append("g")
+          .attr("transform", `translate(0,${{innerH}})`)
+          .call(d3.axisBottom(x))
+          .selectAll("text")
+            .attr("transform", "rotate(-40)")
+            .style("text-anchor", "end");
 
-    g.append("g").call(d3.axisLeft(y).ticks(6));
+        g.append("g").call(d3.axisLeft(y).ticks(6));
 
-    g.selectAll("rect")
-      .data(top)
-      .enter()
-      .append("rect")
-        .attr("x", d => x(d.name))
-        .attr("y", d => y(d.doc_count))
-        .attr("width", x.bandwidth())
-        .attr("height", d => innerH - y(d.doc_count));
+        g.selectAll("rect")
+          .data(top)
+          .enter()
+          .append("rect")
+            .attr("x", d => x(d.name))
+            .attr("y", d => y(d.doc_count))
+            .attr("width", x.bandwidth())
+            .attr("height", d => innerH - y(d.doc_count));
+      }}
+    }}
 
     // ---- Connections list ----
     const edges = (DATA.edges || []).slice(0, 20);
@@ -627,6 +667,9 @@ class EntityBrief(AddOn):
           </details>
         `;
       }}).join("");
+    }}
+    if (demoIndexFallback) {{
+      demoIndexFallback.style.display = "none";
     }}
 
     // ---- Skipped ----

@@ -7,4 +7,5 @@ Notes:
 - The current demo report uses public docs `26301227`, `25943454`, `25943453`, `25943452`.
 - Generate a fresh demo via `python scripts/generate_demo_report.py <doc_id> --output docs/demo/entity-brief-demo.html`.
 - Charts render only when the HTML is opened in a browser (JS required).
+- The demo report includes static image fallbacks if JS/D3 is blocked.
 - Optional helper: `python scripts/render_demo_images.py` writes `docs/demo/top-entities.svg` and `docs/demo/entity-index.txt` for screenshot prep (ignored by git).
