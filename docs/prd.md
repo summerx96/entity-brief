@@ -42,6 +42,7 @@ They hate:
 - Optional tags written back to documents (vNext; deferred in this version)
 - Add-On constraint: one file per run; ship a single HTML file for MVP
 - Feedback form and telemetry are deferred to the next version.
+- Report includes a "Skipped (no entities)" section for docs without extracted entities.
 
 ## Execution environment constraints
 - Runs as a DocumentCloud Add-On (typically via GitHub Actions).

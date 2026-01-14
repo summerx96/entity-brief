@@ -19,6 +19,9 @@ env/
 
 # Generated output files
 entity-brief-*.html
+!docs/demo/entity-brief-demo.html
+docs/demo/*.svg
+docs/demo/*.txt
 
 # OS
 .DS_Store

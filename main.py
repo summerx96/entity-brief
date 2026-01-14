@@ -60,26 +60,48 @@ def _get_access_token(addon: AddOn) -> str:
     raise RuntimeError("Could not locate a DocumentCloud access token.")
 
 
-def _api_get_json(url: str, token: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
+def _api_get(url: str, token: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30,
+             max_retries: int = 3) -> requests.Response:
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
+    for attempt in range(max_retries + 1):
+        resp = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
+        if resp.status_code == 429 and attempt < max_retries:
+            retry_after = _safe_int(resp.headers.get("Retry-After"), 1)
+            time.sleep(max(retry_after, 1))
+            continue
+        return resp
+    return resp
+
+
+def _api_get_json(url: str, token: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
+    resp = _api_get(url, token, params=params, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
 
-def _api_get_all_pages(url: str, token: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def _api_get_all_pages(
+    url: str,
+    token: str,
+    params: Optional[Dict[str, Any]] = None,
+    first_payload: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
     """
     Handle DRF-style pagination: {results: [...], next: url}
     """
     out: List[Dict[str, Any]] = []
+    payload = first_payload
     next_url = url
     next_params = dict(params or {})
-    while next_url:
+    if payload is None:
         payload = _api_get_json(next_url, token, params=next_params)
+    while True:
         if isinstance(payload, dict) and "results" in payload:
             out.extend(payload.get("results", []))
             next_url = payload.get("next")
             next_params = {}  # next already includes query params
+            if not next_url:
+                break
+            payload = _api_get_json(next_url, token, params=next_params)
         elif isinstance(payload, list):
             out.extend(payload)
             break
@@ -105,9 +127,12 @@ def _entity_key(ent: Dict[str, Any]) -> Tuple[str, str]:
     kind = str(ent.get("kind", "Other"))
     # Common fields from entity systems (may/may not exist depending on extractor)
     mid = ent.get("mid") or ent.get("knowledge_graph_mid")
+    wikidata = ent.get("wikidata_id")
     wiki = ent.get("wiki_url") or ent.get("wikipedia_url")
     if mid:
         return (kind, f"mid:{mid}")
+    if wikidata:
+        return (kind, f"wikidata:{wikidata}")
     if wiki:
         return (kind, f"wiki:{wiki}")
     val = str(ent.get("value") or ent.get("name") or "")
@@ -116,6 +141,13 @@ def _entity_key(ent: Dict[str, Any]) -> Tuple[str, str]:
 
 def _entity_display(ent: Dict[str, Any]) -> str:
     return str(ent.get("value") or ent.get("name") or "").strip()
+
+
+def _entity_payload(ent: Dict[str, Any]) -> Dict[str, Any]:
+    payload = ent.get("entity")
+    if isinstance(payload, dict):
+        return payload
+    return ent
 
 
 def _escape(s: str) -> str:
@@ -136,9 +168,10 @@ class EntityBrief(AddOn):
 
         # ---- Fetch docs ----
         self.set_message("Collecting documents...")
-        docs = list(self.get_documents())
-        if max_docs and len(docs) > max_docs:
-            docs = docs[:max_docs]
+        doc_iter = self.get_documents()
+        if max_docs:
+            doc_iter = itertools.islice(doc_iter, max_docs)
+        docs = list(doc_iter)
 
         doc_meta: Dict[int, Dict[str, Any]] = {}
         total_pages = 0
@@ -166,21 +199,43 @@ class EntityBrief(AddOn):
         self.set_message(f"Fetching entities for {len(docs)} documents...")
         doc_entities: Dict[int, List[Dict[str, Any]]] = {}
         failures: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
 
         for i, doc in enumerate(docs, start=1):
+            doc_id = getattr(doc, "id", None)
             try:
-                doc_id = int(getattr(doc, "id"))
+                doc_id = int(doc_id)
                 url = f"{API_BASE}documents/{doc_id}/entities/"
                 params = {
-                    "expand": "occurrences",
+                    "expand": "entity,occurrences",
                     "relevance__gt": min_rel,
                 }
-                ents = _api_get_all_pages(url, token, params=params)
+                resp = _api_get(url, token, params=params)
+                if resp.status_code == 404:
+                    meta = doc_meta.get(doc_id, {"id": doc_id, "title": f"Document {doc_id}", "url": ""})
+                    skipped.append({
+                        "doc_id": doc_id,
+                        "title": meta["title"],
+                        "url": meta["url"],
+                        "reason": "no entities (404)",
+                    })
+                    continue
+                resp.raise_for_status()
+                ents = _api_get_all_pages(url, token, params=params, first_payload=resp.json())
+                if not ents:
+                    meta = doc_meta.get(doc_id, {"id": doc_id, "title": f"Document {doc_id}", "url": ""})
+                    skipped.append({
+                        "doc_id": doc_id,
+                        "title": meta["title"],
+                        "url": meta["url"],
+                        "reason": "no entities",
+                    })
+                    continue
                 doc_entities[doc_id] = ents
-                self.set_progress(10 + int(i / max(len(docs), 1) * 30))
             except Exception as e:
-                failures.append({"doc_id": getattr(doc, "id", None), "error": str(e)})
-                continue
+                failures.append({"doc_id": doc_id, "error": str(e)})
+            finally:
+                self.set_progress(10 + int(i / max(len(docs), 1) * 30))
 
         # ---- Build cross-doc clusters ----
         self.set_message("Normalizing and aggregating entities...")
@@ -192,12 +247,13 @@ class EntityBrief(AddOn):
             keys_for_doc = []
             for ent in ents:
                 try:
-                    kind = str(ent.get("kind", "Other"))
-                    display = _entity_display(ent)
+                    payload = _entity_payload(ent)
+                    kind = str(payload.get("kind", "Other"))
+                    display = _entity_display(payload)
                     if not display:
                         continue
 
-                    key = _entity_key(ent)
+                    key = _entity_key(payload)
                     keys_for_doc.append(key)
 
                     c = clusters.get(key)
@@ -216,7 +272,10 @@ class EntityBrief(AddOn):
                     c["display_names"][display] += 1
                     c["aliases"].add(display)
 
-                    count = int(ent.get("count") or 0)
+                    count = int(ent.get("count") or ent.get("mentions") or 0)
+                    occs = ent.get("occurrences") or []
+                    if not count and occs:
+                        count = len(occs)
                     c["total_mentions"] += count
 
                     if doc_id not in c["docs"]:
@@ -226,12 +285,11 @@ class EntityBrief(AddOn):
                     c["docs"][doc_id]["count"] += count
 
                     # Occurrences may include page/context; best-effort
-                    occs = ent.get("occurrences") or []
                     for occ in occs[:5]:
                         page = occ.get("page")
                         if isinstance(page, int):
                             c["docs"][doc_id]["pages"].add(page)
-                        snippet = occ.get("context") or occ.get("snippet") or ""
+                        snippet = occ.get("context") or occ.get("snippet") or occ.get("content") or ""
                         if snippet:
                             c["docs"][doc_id]["samples"].append(str(snippet)[:200])
 
@@ -308,6 +366,7 @@ class EntityBrief(AddOn):
             "top_entities": cluster_list[: max(top_n, 5)],
             "entities": cluster_list[:500],
             "edges": edges,
+            "skipped": skipped,
             "failures": failures,
         }
 
@@ -330,13 +389,6 @@ class EntityBrief(AddOn):
         data_json = json.dumps(data, ensure_ascii=False)
         run = data["run"]
         meta = data["meta"]
-        feedback_url = meta.get("feedback_url") or ""
-        feedback_block = ""
-        if feedback_url:
-            feedback_block = f"""
-        <p class="small">
-          Feedback form: <a href="{_escape(feedback_url)}">{_escape(feedback_url)}</a>
-        </p>"""
 
         # Note: we keep D3 via CDN for MVP. If you want fully offline reports, embed d3.v7.min.js later.
         return f"""<!doctype html>
@@ -388,7 +440,6 @@ class EntityBrief(AddOn):
           &nbsp;
           <a class="btn" id="mailtoLink" href="#">Email summary to developer</a>
         </p>
-        {feedback_block}
       </div>
 
       <div class="card warn">
@@ -425,13 +476,41 @@ class EntityBrief(AddOn):
   </div>
 
   <div class="card">
-    <h2>Failures / missing entities</h2>
+    <h2>Skipped (no entities)</h2>
+    <div id="skipped"></div>
+  </div>
+
+  <div class="card">
+    <h2>Failures</h2>
     <div id="failures"></div>
   </div>
 
   <script id="data" type="application/json">{html.escape(data_json)}</script>
   <script>
     const DATA = JSON.parse(document.getElementById("data").textContent);
+
+    function escapeHtml(value) {{
+      if (value === null || value === undefined) {{
+        return "";
+      }}
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }}
+
+    function safeUrl(value) {{
+      if (!value) {{
+        return "";
+      }}
+      const url = String(value).trim();
+      if (url.startsWith("http://") || url.startsWith("https://")) {{
+        return url;
+      }}
+      return "";
+    }}
 
     // ---- Share helpers ----
     function runSummaryText() {{
@@ -462,8 +541,7 @@ class EntityBrief(AddOn):
       }}
     }});
 
-    const feedbackLine = DATA.meta.feedback_url ? "\\n\\nFeedback form: " + DATA.meta.feedback_url : "";
-    const mailto = `mailto:${{encodeURIComponent(DATA.meta.developer_email)}}?subject=${{encodeURIComponent("Entity Brief feedback (" + DATA.run.uuid + ")")}}&body=${{encodeURIComponent(runSummaryText() + feedbackLine)}}`;
+    const mailto = `mailto:${{encodeURIComponent(DATA.meta.developer_email)}}?subject=${{encodeURIComponent("Entity Brief feedback (" + DATA.run.uuid + ")")}}&body=${{encodeURIComponent(runSummaryText())}}`;
     document.getElementById("mailtoLink").setAttribute("href", mailto);
 
     // ---- Bar chart (D3) ----
@@ -519,7 +597,7 @@ class EntityBrief(AddOn):
     }} else {{
       let html = "<table><thead><tr><th>Entity A</th><th>Entity B</th><th># Docs together</th></tr></thead><tbody>";
       for (const e of edges) {{
-        html += `<tr><td>${{e.a}}</td><td>${{e.b}}</td><td>${{e.doc_count}}</td></tr>`;
+        html += `<tr><td>${{escapeHtml(e.a)}}</td><td>${{escapeHtml(e.b)}}</td><td>${{escapeHtml(e.doc_count)}}</td></tr>`;
       }}
       html += "</tbody></table>";
       connDiv.innerHTML = html;
@@ -528,21 +606,46 @@ class EntityBrief(AddOn):
     // ---- Entity index ----
     const idx = document.getElementById("entityIndex");
     const ents = (DATA.entities || []).slice(0, 200);
-    idx.innerHTML = ents.map(ent => {{
-      const docs = (ent.docs || []).map(d => {{
-        const pages = (d.pages || []).map(p => `p${{p}}`).join(", ");
-        const samples = (d.samples || []).slice(0, 2).map(s => `<div class="muted small">...${{s}}...</div>`).join("");
-        const link = d.url ? `<a href="${{d.url}}" target="_blank" rel="noreferrer">${{d.title}}</a>` : d.title;
-        return `<div class="small"><strong>${{link}}</strong> - mentions: ${{d.count}}${{pages ? " - pages: " + pages : ""}}${{samples}}</div>`;
+    if (!ents.length) {{
+      idx.innerHTML = "<p class='muted small'>No entities to display.</p>";
+    }} else {{
+      idx.innerHTML = ents.map(ent => {{
+        const docs = (ent.docs || []).map(d => {{
+          const pages = (d.pages || []).map(p => `p${{escapeHtml(p)}}`).join(", ");
+          const samples = (d.samples || []).slice(0, 2).map(s => `<div class="muted small">...${{escapeHtml(s)}}...</div>`).join("");
+          const url = safeUrl(d.url);
+          const title = escapeHtml(d.title || `Document ${{d.doc_id || ""}}`);
+          const link = url ? `<a href="${{escapeHtml(url)}}" target="_blank" rel="noreferrer">${{title}}</a>` : title;
+          return `<div class="small"><strong>${{link}}</strong> - mentions: ${{escapeHtml(d.count)}}${{pages ? " - pages: " + pages : ""}}${{samples}}</div>`;
+        }}).join("");
+        const aliases = (ent.aliases || []).slice(0, 10).map(a => escapeHtml(a)).join(", ");
+        return `
+          <details class="card">
+            <summary><strong>${{escapeHtml(ent.name)}}</strong> <span class="muted">(${{escapeHtml(ent.kind)}})</span> - docs: <strong>${{escapeHtml(ent.doc_count)}}</strong>, mentions: <strong>${{escapeHtml(ent.total_mentions)}}</strong></summary>
+            <div class="small muted">Aliases (sample): ${{aliases}}</div>
+            <div style="margin-top:8px;">${{docs || "<div class='muted small'>No doc details</div>"}}</div>
+          </details>
+        `;
       }}).join("");
-      return `
-        <details class="card">
-          <summary><strong>${{ent.name}}</strong> <span class="muted">(${{ent.kind}})</span> - docs: <strong>${{ent.doc_count}}</strong>, mentions: <strong>${{ent.total_mentions}}</strong></summary>
-          <div class="small muted">Aliases (sample): ${{(ent.aliases||[]).slice(0,10).join(", ")}}</div>
-          <div style="margin-top:8px;">${{docs || "<div class='muted small'>No doc details</div>"}}</div>
-        </details>
-      `;
-    }}).join("");
+    }}
+
+    // ---- Skipped ----
+    const sDiv = document.getElementById("skipped");
+    const skipped = DATA.skipped || [];
+    if (!skipped.length) {{
+      sDiv.innerHTML = "<p class='muted small'>No skipped documents.</p>";
+    }} else {{
+      let html = "<ul class='small'>";
+      for (const s of skipped) {{
+        const url = safeUrl(s.url);
+        const title = escapeHtml(s.title || `Document ${{s.doc_id || ""}}`);
+        const label = url ? `<a href="${{escapeHtml(url)}}" target="_blank" rel="noreferrer">${{title}}</a>` : title;
+        const reason = s.reason ? ` <span class="muted">(${{escapeHtml(s.reason)}})</span>` : "";
+        html += `<li>${{label}}${{reason}}</li>`;
+      }}
+      html += "</ul>";
+      sDiv.innerHTML = html;
+    }}
 
     // ---- Failures ----
     const fDiv = document.getElementById("failures");
@@ -550,7 +653,10 @@ class EntityBrief(AddOn):
     if (!fails.length) {{
       fDiv.innerHTML = "<p class='muted small'>No failures recorded.</p>";
     }} else {{
-      fDiv.innerHTML = "<pre class='small'>" + JSON.stringify(fails, null, 2) + "</pre>";
+      const pre = document.createElement("pre");
+      pre.className = "small";
+      pre.textContent = JSON.stringify(fails, null, 2);
+      fDiv.appendChild(pre);
     }}
   </script>
 </body>
