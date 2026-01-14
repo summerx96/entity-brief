@@ -14,6 +14,13 @@ A DocumentCloud Add-On that aggregates extracted entities across documents into 
 - FOIA requesters working through large batches of released documents.
 - Reporters who need a cross-document index of names, organizations, and places to prioritize follow-up.
 
+## Demo Output
+
+Sample report: `docs/demo/entity-brief-demo.html`
+
+![Top entities chart](docs/demo/screenshot-top-entities.png)
+![Entity index](docs/demo/screenshot-entity-index.png)
+
 ## What it does
 
 - Reads existing entities for the selected/query documents.
