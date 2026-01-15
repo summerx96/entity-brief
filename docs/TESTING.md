@@ -25,7 +25,7 @@ Optional flags:
 Record the doc IDs and canonical URLs returned by the script.
 
 If the script returns none, run DocumentCloud's entity extraction on a public
-document in the UI (Edit → Entities → Extract entities), then re-run the
+document in the UI (Edit -> Entities -> Extract entities), then re-run the
 script or test directly against that doc ID.
 
 ## 2) Run the add-on in the DocumentCloud UI
@@ -37,6 +37,9 @@ script or test directly against that doc ID.
 - Docs with missing entities (404 or empty results) are listed under **Skipped (no entities)**.
 - Unhandled API errors are listed under **Failures**.
 - Exactly one HTML report is returned via `upload_file()`.
+- Low entity coverage warning appears when too few docs have entities.
+- Filters and exports work in the HTML report (kind, coverage slider, stoplist, CSV/JSON downloads).
+- Connections include page-level examples when page data is available.
 
 ## 4) Log the run
 Update this table after each verification run.
@@ -48,3 +51,4 @@ Update this table after each verification run.
 | 2026-01-13 | 26301227, 25943454, 25943453, 25943452 | pass | entities present; demo report regenerated (unique_entities: 62) |
 | 2026-01-14 | 26301227, 25943454, 25943453, 25943452 | pass | regenerated demo report locally and verified charts in browser |
 | 2026-01-14 | 26301227, 25943454, 25943453, 25943452 | pass | demo report regenerated with static image fallbacks |
+| 2026-01-14 | 26301227, 25943454, 25943453, 25943452 | pass | regenerated demo with filters/exports and page-level connections |

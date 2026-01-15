@@ -21,6 +21,7 @@ FEEDBACK_URL = os.environ.get("ENTITY_BRIEF_FEEDBACK_URL", "")
 DEVELOPER_EMAIL = os.environ.get("ENTITY_BRIEF_DEV_EMAIL", "summerxie966@gmail.com")
 
 D3_CDN = "https://d3js.org/d3.v7.min.js"
+ENTITY_COVERAGE_WARN_THRESHOLD = 0.4
 
 
 # ---- Helpers ----
@@ -242,9 +243,11 @@ class EntityBrief(AddOn):
         clusters: Dict[Tuple[str, str], Dict[str, Any]] = {}
         # Per-doc canonical set for co-occurrence
         doc_entity_keys: Dict[int, List[Tuple[str, str]]] = {}
+        doc_page_entities: Dict[int, Dict[int, set]] = {}
 
         for doc_id, ents in doc_entities.items():
             keys_for_doc = []
+            page_entities: Dict[int, set] = {}
             for ent in ents:
                 try:
                     payload = _entity_payload(ent)
@@ -285,10 +288,16 @@ class EntityBrief(AddOn):
                     c["docs"][doc_id]["count"] += count
 
                     # Occurrences may include page/context; best-effort
-                    for occ in occs[:5]:
+                    pages_for_ent = set()
+                    for occ in occs:
                         page = occ.get("page")
                         if isinstance(page, int):
-                            c["docs"][doc_id]["pages"].add(page)
+                            pages_for_ent.add(page)
+                            page_entities.setdefault(page, set()).add(key)
+                    if pages_for_ent:
+                        c["docs"][doc_id]["pages"].update(pages_for_ent)
+                    for occ in occs[:5]:
+                        page = occ.get("page")
                         snippet = occ.get("context") or occ.get("snippet") or occ.get("content") or ""
                         if snippet:
                             c["docs"][doc_id]["samples"].append(str(snippet)[:200])
@@ -297,6 +306,8 @@ class EntityBrief(AddOn):
                     continue
 
             doc_entity_keys[doc_id] = keys_for_doc
+            if page_entities:
+                doc_page_entities[doc_id] = page_entities
 
         # Finalize cluster display name
         cluster_list: List[Dict[str, Any]] = []
@@ -317,6 +328,7 @@ class EntityBrief(AddOn):
             docs_out.sort(key=lambda x: (-x["count"], x["title"]))
 
             cluster_list.append({
+                "key": c["canonical_key"],
                 "kind": c["kind"],
                 "name": display,
                 "aliases": sorted(list(c["aliases"]))[:25],
@@ -331,30 +343,87 @@ class EntityBrief(AddOn):
         edges: List[Dict[str, Any]] = []
         if include_connections:
             self.set_message("Computing co-occurrence connections...")
-            pair_counts = Counter()
-            for did, keys in doc_entity_keys.items():
-                # Use only top entities per doc to avoid combinatorial blowup
-                unique = list(dict.fromkeys(keys))  # stable unique
-                unique = unique[:25]
-                for a, b in itertools.combinations(sorted(unique), 2):
-                    pair_counts[(a, b)] += 1
-            for (a, b), dc in pair_counts.most_common(50):
-                a_name = clusters.get(a, {}).get("display_names", Counter()).most_common(1)
-                b_name = clusters.get(b, {}).get("display_names", Counter()).most_common(1)
-                edges.append({
-                    "a": a_name[0][0] if a_name else a[1],
-                    "b": b_name[0][0] if b_name else b[1],
-                    "doc_count": dc,
-                })
+            pair_stats: Dict[Tuple[Tuple[str, str], Tuple[str, str]], Dict[str, Any]] = {}
+            any_page_data = False
+
+            def _display_name(key: Tuple[str, str]) -> str:
+                display = clusters.get(key, {}).get("display_names", Counter()).most_common(1)
+                return display[0][0] if display else key[1]
+
+            def _key_score(key: Tuple[str, str]) -> int:
+                return int(clusters.get(key, {}).get("total_mentions", 0))
+
+            for did, page_map in doc_page_entities.items():
+                if not page_map:
+                    continue
+                any_page_data = True
+                for page, keys in page_map.items():
+                    unique = sorted(set(keys), key=lambda k: (-_key_score(k), str(k)))
+                    unique = unique[:25]
+                    for a, b in itertools.combinations(sorted(unique), 2):
+                        stat = pair_stats.get((a, b))
+                        if not stat:
+                            stat = {"docs": set(), "pages": set(), "examples": []}
+                            pair_stats[(a, b)] = stat
+                        stat["docs"].add(did)
+                        stat["pages"].add((did, page))
+                        if len(stat["examples"]) < 3:
+                            stat["examples"].append((did, page))
+
+            if not any_page_data:
+                pair_counts = Counter()
+                for did, keys in doc_entity_keys.items():
+                    # Use only top entities per doc to avoid combinatorial blowup
+                    unique = list(dict.fromkeys(keys))  # stable unique
+                    unique = unique[:25]
+                    for a, b in itertools.combinations(sorted(unique), 2):
+                        pair_counts[(a, b)] += 1
+                for (a, b), dc in pair_counts.most_common(50):
+                    edges.append({
+                        "a": _display_name(a),
+                        "b": _display_name(b),
+                        "a_key": f"{a[0]}::{a[1]}",
+                        "b_key": f"{b[0]}::{b[1]}",
+                        "doc_count": dc,
+                        "page_count": 0,
+                        "examples": [],
+                    })
+            else:
+                for (a, b), stat in pair_stats.items():
+                    examples = []
+                    for did, page in stat["examples"]:
+                        meta = doc_meta.get(did, {"id": did, "title": f"Document {did}", "url": ""})
+                        examples.append({
+                            "doc_id": did,
+                            "title": meta["title"],
+                            "url": meta["url"],
+                            "page": page,
+                        })
+                    edges.append({
+                        "a": _display_name(a),
+                        "b": _display_name(b),
+                        "a_key": f"{a[0]}::{a[1]}",
+                        "b_key": f"{b[0]}::{b[1]}",
+                        "doc_count": len(stat["docs"]),
+                        "page_count": len(stat["pages"]),
+                        "examples": examples,
+                    })
+                edges.sort(key=lambda x: (-x.get("page_count", 0), -x.get("doc_count", 0), x["a"], x["b"]))
+                edges = edges[:50]
 
         # ---- Build report data ----
         runtime_s = round(time.time() - start_ts, 2)
+        docs_with_entities = len(doc_entities)
+        entity_coverage = (docs_with_entities / len(docs)) if docs else 0
         report_data = {
             "run": {
                 "uuid": run_uuid,
                 "version": ADDON_VERSION,
                 "runtime_seconds": runtime_s,
                 "docs_processed": len(docs),
+                "entity_docs": docs_with_entities,
+                "entity_coverage": round(entity_coverage, 3),
+                "entity_coverage_threshold": ENTITY_COVERAGE_WARN_THRESHOLD,
                 "pages_processed": total_pages,
                 "unique_entities": len(cluster_list),
                 "generated_at_epoch": int(time.time()),
@@ -403,6 +472,25 @@ class EntityBrief(AddOn):
         <p class="muted">Demo preview (static image shown if JS is blocked):</p>
         <img src="screenshot-entity-index.png" alt="Entity index preview" style="width: 100%; max-width: 900px; border: 1px solid #eee; border-radius: 8px;" />
       </div>"""
+        coverage_warning_block = ""
+        docs_processed = int(run.get("docs_processed", 0) or 0)
+        entity_docs = int(run.get("entity_docs", 0) or 0)
+        entity_coverage = float(run.get("entity_coverage", 0) or 0)
+        if docs_processed and entity_coverage < ENTITY_COVERAGE_WARN_THRESHOLD:
+            coverage_pct = int(entity_coverage * 100)
+            coverage_warning_block = f"""
+  <div class="card warn">
+    <h3>Low entity coverage</h3>
+    <p class="small">
+      Only {entity_docs} of {docs_processed} documents have extracted entities ({coverage_pct}%).
+    </p>
+    <p class="small"><strong>What to run first:</strong></p>
+    <ol class="small">
+      <li>Open a document and run <em>Edit -> Entities -> Extract entities</em> (or run the Google Cloud Entity Extractor add-on).</li>
+      <li>Wait for extraction to finish, then re-run Entity Brief.</li>
+      <li>Docs without entities appear under <strong>Skipped (no entities)</strong>.</li>
+    </ol>
+  </div>"""
 
         # Note: we keep D3 via CDN for MVP. If you want fully offline reports, embed d3.v7.min.js later.
         return f"""<!doctype html>
@@ -419,6 +507,7 @@ class EntityBrief(AddOn):
     .row {{ display: flex; gap: 16px; flex-wrap: wrap; }}
     .row > .card {{ flex: 1 1 360px; }}
     .btn {{ display: inline-block; padding: 8px 10px; border: 1px solid #888; border-radius: 8px; text-decoration: none; color: inherit; }}
+    button.btn {{ background: #fff; cursor: pointer; }}
     code {{ background: #f6f6f6; padding: 2px 4px; border-radius: 4px; }}
     table {{ border-collapse: collapse; width: 100%; }}
     th, td {{ border-bottom: 1px solid #eee; padding: 6px 8px; vertical-align: top; }}
@@ -426,6 +515,9 @@ class EntityBrief(AddOn):
     details summary {{ cursor: pointer; }}
     .small {{ font-size: 0.9em; }}
     .warn {{ background: #fff6e5; border-color: #ffd28a; }}
+    .controls {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }}
+    label {{ display: block; font-weight: 600; margin-bottom: 4px; }}
+    select, textarea, input[type="text"], input[type="range"] {{ width: 100%; }}
   </style>
 </head>
 <body>
@@ -438,6 +530,7 @@ class EntityBrief(AddOn):
       <strong>Run UUID:</strong> <code id="runUuid">{_escape(run["uuid"])}</code><br/>
       <strong>Version:</strong> <code>{_escape(run["version"])}</code><br/>
       <strong>Docs processed:</strong> {run["docs_processed"]} &nbsp; | &nbsp;
+      <strong>Docs with entities:</strong> {run.get("entity_docs", 0)} &nbsp; | &nbsp;
       <strong>Pages processed:</strong> {run["pages_processed"]} &nbsp; | &nbsp;
       <strong>Unique entities:</strong> {run["unique_entities"]} &nbsp; | &nbsp;
       <strong>Runtime:</strong> {run["runtime_seconds"]}s
@@ -467,6 +560,47 @@ class EntityBrief(AddOn):
     </div>
   </div>
 
+  {coverage_warning_block}
+
+  <div class="card">
+    <h2>Filters & exports</h2>
+    <div class="controls">
+      <div>
+        <label for="kindFilter">Entity type</label>
+        <select id="kindFilter"></select>
+      </div>
+      <div>
+        <label for="coverageFilter">Minimum doc coverage</label>
+        <input type="range" id="coverageFilter" min="1" max="1" value="1" />
+        <div class="small muted">Showing entities in at least <span id="coverageValue">1</span> docs.</div>
+      </div>
+      <div>
+        <label for="stoplist">Exclude names (comma or line separated)</label>
+        <textarea id="stoplist" rows="2" placeholder="Example: United States, City"></textarea>
+      </div>
+      <div>
+        <label for="sortBy">Sort entities by</label>
+        <select id="sortBy">
+          <option value="doc_count">Doc coverage (default)</option>
+          <option value="total_mentions">Total mentions</option>
+          <option value="name">Name (A-Z)</option>
+        </select>
+      </div>
+    </div>
+    <p style="margin-top: 8px;">
+      <button class="btn" id="applyFilters" type="button">Apply filters</button>
+      <button class="btn" id="resetFilters" type="button">Reset</button>
+    </p>
+    <p class="small muted">Exports use the current filters.</p>
+    <p>
+      <button class="btn" id="exportEntities" type="button">Download entity index CSV</button>
+      &nbsp;
+      <button class="btn" id="exportConnectionsCsv" type="button">Download connections CSV</button>
+      &nbsp;
+      <button class="btn" id="exportConnectionsJson" type="button">Download connections JSON</button>
+    </p>
+  </div>
+
   <div class="row">
     <div class="card">
       <h2>Top Entities (by document coverage)</h2>
@@ -478,7 +612,7 @@ class EntityBrief(AddOn):
     <div class="card">
       <h2>Top Connections (co-occurrence)</h2>
       <div id="connections"></div>
-      <p class="small muted">Pairs that appear together across the same documents (ranked by doc count).</p>
+      <p class="small muted">Pairs that appear together on the same pages when page data is available.</p>
     </div>
   </div>
 
@@ -528,6 +662,14 @@ class EntityBrief(AddOn):
       return "";
     }}
 
+    function docPageUrl(baseUrl, page) {{
+      if (!baseUrl) {{
+        return "";
+      }}
+      const base = String(baseUrl).split("#")[0];
+      return `${{base}}#document/p${{page}}`;
+    }}
+
     const demoChartFallback = document.getElementById("chartFallback");
     const demoIndexFallback = document.getElementById("indexFallback");
 
@@ -539,6 +681,7 @@ class EntityBrief(AddOn):
         `Run UUID: ${{r.uuid}}`,
         `Version: ${{r.version}}`,
         `Docs processed: ${{r.docs_processed}}`,
+        `Docs with entities: ${{r.entity_docs || 0}}`,
         `Pages processed: ${{r.pages_processed}}`,
         `Unique entities: ${{r.unique_entities}}`,
         `Runtime (s): ${{r.runtime_seconds}}`,
@@ -563,114 +706,395 @@ class EntityBrief(AddOn):
     const mailto = `mailto:${{encodeURIComponent(DATA.meta.developer_email)}}?subject=${{encodeURIComponent("Entity Brief feedback (" + DATA.run.uuid + ")")}}&body=${{encodeURIComponent(runSummaryText())}}`;
     document.getElementById("mailtoLink").setAttribute("href", mailto);
 
-    // ---- Bar chart (D3) ----
-    const top = (DATA.top_entities || []).slice(0, 15).map(d => ({{
-      name: d.name,
-      kind: d.kind,
-      doc_count: d.doc_count,
-      total_mentions: d.total_mentions
-    }}));
+    const ENTITIES = DATA.entities || [];
+    const EDGES = DATA.edges || [];
 
-    const chartSvg = document.getElementById("barChart");
-    const hasD3 = typeof d3 !== "undefined";
-    if (!hasD3) {{
-      if (!demoChartFallback && chartSvg) {{
-        const note = document.createElement("p");
-        note.className = "small muted";
-        note.textContent = "Chart could not render (D3 failed to load).";
-        chartSvg.insertAdjacentElement("beforebegin", note);
+    const kindFilter = document.getElementById("kindFilter");
+    const coverageFilter = document.getElementById("coverageFilter");
+    const coverageValue = document.getElementById("coverageValue");
+    const stoplistInput = document.getElementById("stoplist");
+    const sortBy = document.getElementById("sortBy");
+    const applyFiltersBtn = document.getElementById("applyFilters");
+    const resetFiltersBtn = document.getElementById("resetFilters");
+    const exportEntitiesBtn = document.getElementById("exportEntities");
+    const exportConnectionsCsvBtn = document.getElementById("exportConnectionsCsv");
+    const exportConnectionsJsonBtn = document.getElementById("exportConnectionsJson");
+
+    let currentEntities = ENTITIES.slice();
+    let currentEdges = EDGES.slice();
+
+    function normalizeTerm(value) {{
+      return String(value || "").toLowerCase().trim();
+    }}
+
+    function parseStoplist(text) {{
+      const terms = String(text || "")
+        .split(/[,\\n]/)
+        .map(term => term.trim())
+        .filter(Boolean)
+        .map(normalizeTerm);
+      return new Set(terms);
+    }}
+
+    function csvEscape(value) {{
+      const str = value === null || value === undefined ? "" : String(value);
+      if (str.includes("\\\"") || str.includes(",") || str.includes("\\n")) {{
+        return `"${{str.replace(/"/g, '""')}}"`;
       }}
-    }} else if (chartSvg) {{
+      return str;
+    }}
+
+    function toCsv(rows) {{
+      return rows.map(row => row.map(csvEscape).join(",")).join("\\n");
+    }}
+
+    function downloadText(filename, text) {{
+      const blob = new Blob([text], {{type: "text/plain"}});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }}
+
+    function buildEntityIndexCsv(entities) {{
+      const rows = [[
+        "entity_name",
+        "entity_kind",
+        "entity_doc_count",
+        "entity_total_mentions",
+        "doc_id",
+        "doc_title",
+        "doc_url",
+        "doc_pages",
+        "doc_mentions"
+      ]];
+      for (const ent of entities) {{
+        const docs = ent.docs || [];
+        if (!docs.length) {{
+          rows.push([ent.name, ent.kind, ent.doc_count, ent.total_mentions, "", "", "", "", ""]);
+          continue;
+        }}
+        for (const doc of docs) {{
+          const pages = (doc.pages || []).join(";");
+          rows.push([
+            ent.name,
+            ent.kind,
+            ent.doc_count,
+            ent.total_mentions,
+            doc.doc_id || "",
+            doc.title || "",
+            doc.url || "",
+            pages,
+            doc.count || ""
+          ]);
+        }}
+      }}
+      return toCsv(rows);
+    }}
+
+    function buildConnectionsCsv(edges) {{
+      const rows = [[
+        "entity_a",
+        "entity_b",
+        "doc_count",
+        "page_count",
+        "example_pages"
+      ]];
+      for (const edge of edges) {{
+        const examples = (edge.examples || []).map(ex => {{
+          const title = ex.title || `Document ${{ex.doc_id || ""}}`;
+          const page = ex.page !== undefined ? `p${{ex.page}}` : "";
+          return `${{title}} ${{page}}`.trim();
+        }}).join(" | ");
+        rows.push([
+          edge.a,
+          edge.b,
+          edge.doc_count || "",
+          edge.page_count || "",
+          examples
+        ]);
+      }}
+      return toCsv(rows);
+    }}
+
+    function renderChart(entities) {{
+      const chartSvg = document.getElementById("barChart");
+      if (!chartSvg) {{
+        return;
+      }}
+      const top = entities.slice(0, 15).map(d => ({{
+        name: d.name,
+        kind: d.kind,
+        doc_count: d.doc_count,
+        total_mentions: d.total_mentions
+      }}));
+      const hasD3 = typeof d3 !== "undefined";
+      const existingNote = document.getElementById("chartNote");
+      if (existingNote) {{
+        existingNote.remove();
+      }}
+      if (!hasD3) {{
+        if (!demoChartFallback) {{
+          const note = document.createElement("p");
+          note.id = "chartNote";
+          note.className = "small muted";
+          note.textContent = "Chart could not render (D3 failed to load).";
+          chartSvg.insertAdjacentElement("beforebegin", note);
+        }}
+        return;
+      }}
       if (demoChartFallback) {{
         demoChartFallback.style.display = "none";
       }}
+      const svg = d3.select(chartSvg);
+      svg.selectAll("*").remove();
       if (!top.length) {{
         const note = document.createElement("p");
+        note.id = "chartNote";
         note.className = "small muted";
         note.textContent = "No entities available for chart.";
         chartSvg.insertAdjacentElement("beforebegin", note);
-      }} else {{
-        const svg = d3.select(chartSvg);
-        const width = +svg.attr("width");
-        const height = +svg.attr("height");
-        const margin = {{top: 20, right: 20, bottom: 120, left: 60}};
-        const innerW = width - margin.left - margin.right;
-        const innerH = height - margin.top - margin.bottom;
-
-        const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
-
-        const x = d3.scaleBand()
-          .domain(top.map(d => d.name))
-          .range([0, innerW])
-          .padding(0.15);
-
-        const y = d3.scaleLinear()
-          .domain([0, d3.max(top, d => d.doc_count) || 1])
-          .nice()
-          .range([innerH, 0]);
-
-        g.append("g")
-          .attr("transform", `translate(0,${{innerH}})`)
-          .call(d3.axisBottom(x))
-          .selectAll("text")
-            .attr("transform", "rotate(-40)")
-            .style("text-anchor", "end");
-
-        g.append("g").call(d3.axisLeft(y).ticks(6));
-
-        g.selectAll("rect")
-          .data(top)
-          .enter()
-          .append("rect")
-            .attr("x", d => x(d.name))
-            .attr("y", d => y(d.doc_count))
-            .attr("width", x.bandwidth())
-            .attr("height", d => innerH - y(d.doc_count));
+        return;
       }}
+
+      const width = +svg.attr("width");
+      const height = +svg.attr("height");
+      const margin = {{top: 20, right: 20, bottom: 120, left: 60}};
+      const innerW = width - margin.left - margin.right;
+      const innerH = height - margin.top - margin.bottom;
+
+      const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
+
+      const x = d3.scaleBand()
+        .domain(top.map(d => d.name))
+        .range([0, innerW])
+        .padding(0.15);
+
+      const y = d3.scaleLinear()
+        .domain([0, d3.max(top, d => d.doc_count) || 1])
+        .nice()
+        .range([innerH, 0]);
+
+      g.append("g")
+        .attr("transform", `translate(0,${{innerH}})`)
+        .call(d3.axisBottom(x))
+        .selectAll("text")
+          .attr("transform", "rotate(-40)")
+          .style("text-anchor", "end");
+
+      g.append("g").call(d3.axisLeft(y).ticks(6));
+
+      g.selectAll("rect")
+        .data(top)
+        .enter()
+        .append("rect")
+          .attr("x", d => x(d.name))
+          .attr("y", d => y(d.doc_count))
+          .attr("width", x.bandwidth())
+          .attr("height", d => innerH - y(d.doc_count));
     }}
 
-    // ---- Connections list ----
-    const edges = (DATA.edges || []).slice(0, 20);
-    const connDiv = document.getElementById("connections");
-    if (!edges.length) {{
-      connDiv.innerHTML = "<p class='muted small'>No connections computed (or not enough entities).</p>";
-    }} else {{
-      let html = "<table><thead><tr><th>Entity A</th><th>Entity B</th><th># Docs together</th></tr></thead><tbody>";
-      for (const e of edges) {{
-        html += `<tr><td>${{escapeHtml(e.a)}}</td><td>${{escapeHtml(e.b)}}</td><td>${{escapeHtml(e.doc_count)}}</td></tr>`;
+    function renderConnections(edges) {{
+      const connDiv = document.getElementById("connections");
+      if (!connDiv) {{
+        return;
+      }}
+      const displayEdges = edges.slice(0, 20);
+      if (!displayEdges.length) {{
+        connDiv.innerHTML = "<p class='muted small'>No connections computed (or not enough entities).</p>";
+        return;
+      }}
+      let html = "<table><thead><tr><th>Entity A</th><th>Entity B</th><th>Docs</th><th>Pages</th><th>Example pages</th></tr></thead><tbody>";
+      for (const e of displayEdges) {{
+        const examples = (e.examples || []).map(ex => {{
+          const title = escapeHtml(ex.title || `Document ${{ex.doc_id || ""}}`);
+          const url = safeUrl(ex.url);
+          const pageLabel = ex.page !== undefined ? `p${{escapeHtml(ex.page)}}` : "";
+          if (url && ex.page !== undefined) {{
+            return `<a href="${{escapeHtml(docPageUrl(url, ex.page))}}" target="_blank" rel="noreferrer">${{title}} (${{pageLabel}})</a>`;
+          }}
+          if (url) {{
+            return `<a href="${{escapeHtml(url)}}" target="_blank" rel="noreferrer">${{title}}</a>${{pageLabel ? " (" + pageLabel + ")" : ""}}`;
+          }}
+          return `${{title}}${{pageLabel ? " (" + pageLabel + ")" : ""}}`;
+        }}).join("<br/>");
+        html += `<tr><td>${{escapeHtml(e.a)}}</td><td>${{escapeHtml(e.b)}}</td><td>${{escapeHtml(e.doc_count)}}</td><td>${{escapeHtml(e.page_count || "")}}</td><td>${{examples || "-"}}</td></tr>`;
       }}
       html += "</tbody></table>";
       connDiv.innerHTML = html;
     }}
 
-    // ---- Entity index ----
-    const idx = document.getElementById("entityIndex");
-    const ents = (DATA.entities || []).slice(0, 200);
-    if (!ents.length) {{
-      idx.innerHTML = "<p class='muted small'>No entities to display.</p>";
-    }} else {{
-      idx.innerHTML = ents.map(ent => {{
-        const docs = (ent.docs || []).map(d => {{
-          const pages = (d.pages || []).map(p => `p${{escapeHtml(p)}}`).join(", ");
-          const samples = (d.samples || []).slice(0, 2).map(s => `<div class="muted small">...${{escapeHtml(s)}}...</div>`).join("");
-          const url = safeUrl(d.url);
-          const title = escapeHtml(d.title || `Document ${{d.doc_id || ""}}`);
-          const link = url ? `<a href="${{escapeHtml(url)}}" target="_blank" rel="noreferrer">${{title}}</a>` : title;
-          return `<div class="small"><strong>${{link}}</strong> - mentions: ${{escapeHtml(d.count)}}${{pages ? " - pages: " + pages : ""}}${{samples}}</div>`;
+    function renderEntityIndex(entities) {{
+      const idx = document.getElementById("entityIndex");
+      if (!idx) {{
+        return;
+      }}
+      const displayEntities = entities.slice(0, 200);
+      if (!displayEntities.length) {{
+        idx.innerHTML = "<p class='muted small'>No entities to display.</p>";
+      }} else {{
+        idx.innerHTML = displayEntities.map(ent => {{
+          const docs = (ent.docs || []).map(d => {{
+            const url = safeUrl(d.url);
+            const title = escapeHtml(d.title || `Document ${{d.doc_id || ""}}`);
+            const link = url ? `<a href="${{escapeHtml(url)}}" target="_blank" rel="noreferrer">${{title}}</a>` : title;
+            const pages = (d.pages || []).map(p => {{
+              const label = `p${{escapeHtml(p)}}`;
+              if (url) {{
+                return `<a href="${{escapeHtml(docPageUrl(url, p))}}" target="_blank" rel="noreferrer">${{label}}</a>`;
+              }}
+              return label;
+            }}).join(", ");
+            const samples = (d.samples || []).slice(0, 2).map(s => `<div class="muted small">...${{escapeHtml(s)}}...</div>`).join("");
+            return `<div class="small"><strong>${{link}}</strong> - mentions: ${{escapeHtml(d.count)}}${{pages ? " - pages: " + pages : ""}}${{samples}}</div>`;
+          }}).join("");
+          const aliases = (ent.aliases || []).slice(0, 10).map(a => escapeHtml(a)).join(", ");
+          return `
+            <details class="card">
+              <summary><strong>${{escapeHtml(ent.name)}}</strong> <span class="muted">(${{escapeHtml(ent.kind)}})</span> - docs: <strong>${{escapeHtml(ent.doc_count)}}</strong>, mentions: <strong>${{escapeHtml(ent.total_mentions)}}</strong></summary>
+              <div class="small muted">Aliases (sample): ${{aliases}}</div>
+              <div style="margin-top:8px;">${{docs || "<div class='muted small'>No doc details</div>"}}</div>
+            </details>
+          `;
         }}).join("");
-        const aliases = (ent.aliases || []).slice(0, 10).map(a => escapeHtml(a)).join(", ");
-        return `
-          <details class="card">
-            <summary><strong>${{escapeHtml(ent.name)}}</strong> <span class="muted">(${{escapeHtml(ent.kind)}})</span> - docs: <strong>${{escapeHtml(ent.doc_count)}}</strong>, mentions: <strong>${{escapeHtml(ent.total_mentions)}}</strong></summary>
-            <div class="small muted">Aliases (sample): ${{aliases}}</div>
-            <div style="margin-top:8px;">${{docs || "<div class='muted small'>No doc details</div>"}}</div>
-          </details>
-        `;
-      }}).join("");
+      }}
+      if (demoIndexFallback) {{
+        demoIndexFallback.style.display = "none";
+      }}
     }}
-    if (demoIndexFallback) {{
-      demoIndexFallback.style.display = "none";
+
+    function applyFilters() {{
+      const kindValue = kindFilter ? kindFilter.value : "All";
+      const minDocs = coverageFilter ? parseInt(coverageFilter.value || "1", 10) : 1;
+      const stoplist = parseStoplist(stoplistInput ? stoplistInput.value : "");
+      const stopTerms = Array.from(stoplist);
+      const sortValue = sortBy ? sortBy.value : "doc_count";
+
+      currentEntities = ENTITIES.filter(ent => {{
+        if (kindValue !== "All" && ent.kind !== kindValue) {{
+          return false;
+        }}
+        if (ent.doc_count < minDocs) {{
+          return false;
+        }}
+        if (stopTerms.length) {{
+          const name = normalizeTerm(ent.name);
+          if (stopTerms.some(term => name.includes(term))) {{
+            return false;
+          }}
+          const aliases = (ent.aliases || []).map(normalizeTerm);
+          if (aliases.some(alias => stopTerms.some(term => alias.includes(term)))) {{
+            return false;
+          }}
+        }}
+        return true;
+      }});
+
+      currentEntities.sort((a, b) => {{
+        if (sortValue === "total_mentions") {{
+          return (b.total_mentions - a.total_mentions) || (b.doc_count - a.doc_count) || a.name.localeCompare(b.name);
+        }}
+        if (sortValue === "name") {{
+          return a.name.localeCompare(b.name);
+        }}
+        return (b.doc_count - a.doc_count) || (b.total_mentions - a.total_mentions) || a.name.localeCompare(b.name);
+      }});
+
+      const keySet = new Set(currentEntities.map(ent => ent.key));
+      currentEdges = EDGES.filter(edge => keySet.has(edge.a_key) && keySet.has(edge.b_key));
+      currentEdges.sort((a, b) => {{
+        return (b.page_count - a.page_count) || (b.doc_count - a.doc_count) || a.a.localeCompare(b.a);
+      }});
+
+      renderChart(currentEntities);
+      renderConnections(currentEdges);
+      renderEntityIndex(currentEntities);
     }}
+
+    function initControls() {{
+      if (!kindFilter) {{
+        renderChart(currentEntities);
+        renderConnections(currentEdges);
+        renderEntityIndex(currentEntities);
+        return;
+      }}
+      const kinds = Array.from(new Set(ENTITIES.map(ent => ent.kind))).sort();
+      kindFilter.innerHTML = `<option value="All">All</option>${{kinds.map(kind => `<option value="${{escapeHtml(kind)}}">${{escapeHtml(kind)}}</option>`).join("")}}`;
+
+      const maxDocCount = Math.max(...ENTITIES.map(ent => ent.doc_count), 1);
+      if (coverageFilter) {{
+        coverageFilter.max = String(maxDocCount);
+        coverageFilter.value = "1";
+      }}
+      if (coverageValue) {{
+        coverageValue.textContent = "1";
+      }}
+      if (coverageFilter && coverageValue) {{
+        coverageFilter.addEventListener("input", () => {{
+          coverageValue.textContent = coverageFilter.value;
+        }});
+      }}
+
+      if (applyFiltersBtn) {{
+        applyFiltersBtn.addEventListener("click", (e) => {{
+          e.preventDefault();
+          applyFilters();
+        }});
+      }}
+      if (resetFiltersBtn) {{
+        resetFiltersBtn.addEventListener("click", (e) => {{
+          e.preventDefault();
+          if (kindFilter) {{
+            kindFilter.value = "All";
+          }}
+          if (coverageFilter) {{
+            coverageFilter.value = "1";
+          }}
+          if (coverageValue) {{
+            coverageValue.textContent = "1";
+          }}
+          if (stoplistInput) {{
+            stoplistInput.value = "";
+          }}
+          if (sortBy) {{
+            sortBy.value = "doc_count";
+          }}
+          applyFilters();
+        }});
+      }}
+
+      if (exportEntitiesBtn) {{
+        exportEntitiesBtn.addEventListener("click", (e) => {{
+          e.preventDefault();
+          const csv = buildEntityIndexCsv(currentEntities);
+          downloadText(`entity-brief-entities-${{DATA.run.uuid}}.csv`, csv);
+        }});
+      }}
+
+      if (exportConnectionsCsvBtn) {{
+        exportConnectionsCsvBtn.addEventListener("click", (e) => {{
+          e.preventDefault();
+          const csv = buildConnectionsCsv(currentEdges);
+          downloadText(`entity-brief-connections-${{DATA.run.uuid}}.csv`, csv);
+        }});
+      }}
+
+      if (exportConnectionsJsonBtn) {{
+        exportConnectionsJsonBtn.addEventListener("click", (e) => {{
+          e.preventDefault();
+          const jsonText = JSON.stringify(currentEdges, null, 2);
+          downloadText(`entity-brief-connections-${{DATA.run.uuid}}.json`, jsonText);
+        }});
+      }}
+
+      applyFilters();
+    }}
+
+    initControls();
 
     // ---- Skipped ----
     const sDiv = document.getElementById("skipped");

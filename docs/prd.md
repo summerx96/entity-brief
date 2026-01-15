@@ -38,11 +38,12 @@ They hate:
 
 ## Outputs
 - One HTML report (downloadable from the Add-On run)
-- Report-first: primary output is a human-readable brief for sharing and verification (not a data export).
+- Report-first: primary output is a human-readable brief for sharing and verification (with optional client-side exports).
 - Optional tags written back to documents (vNext; deferred in this version)
 - Add-On constraint: one file per run; ship a single HTML file for MVP
 - Feedback form and telemetry are deferred to the next version.
 - Report includes a "Skipped (no entities)" section for docs without extracted entities.
+- Report shows a "Low entity coverage" warning when too few docs have entities and explains what to run first.
 
 ## Execution environment constraints
 - Runs as a DocumentCloud Add-On (typically via GitHub Actions).
@@ -58,11 +59,11 @@ They hate:
   - Kind (Person/Org/Location/Date/Other)
   - Total mentions
   - Doc coverage (# docs containing it)
-  - Per-doc breakdown with doc links + page refs (receipts)
+  - Per-doc breakdown with doc links + page refs (receipts, linked to exact pages)
 
 ### F2 - Two simple visuals (D3 constraint)
 - Bar chart (D3): Top 15 entities by doc coverage
-- List/table: Top 20 co-occurrence pairs ranked by doc count
+- List/table: Top 20 co-occurrence pairs ranked by page/doc count, with example page links
 - No force-graph in MVP
 
 ### F3 - NIW "run certificate" block (evidence generator)
@@ -82,7 +83,13 @@ Include:
 - Clearly state: only selected/query docs are processed
 - Clearly state: no document text is uploaded externally unless the user opts in
 
-### F5 - Optional opt-in anonymous telemetry (vNext)
+### F5 - Filters and exports (client-side)
+- Filter by entity kind
+- Minimum doc coverage slider
+- Stoplist for noisy names (client-side)
+- Exports from the HTML report (entity index CSV, connections CSV/JSON)
+
+### F6 - Optional opt-in anonymous telemetry (vNext)
 Deferred for the current version. When enabled, POST only:
 - run_uuid
 - addon_version

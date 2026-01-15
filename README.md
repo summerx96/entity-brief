@@ -4,7 +4,7 @@ A DocumentCloud Add-On that aggregates extracted entities across documents into 
 
 ## Quick Start (DocumentCloud UI)
 
-1) Ensure entities exist for the documents (named people/orgs/places from **Edit → Entities → Extract entities**, or an extraction add-on).
+1) Ensure entities exist for the documents (named people/orgs/places from **Edit -> Entities -> Extract entities**, or an extraction add-on).
 2) Select documents (or run a query).
 3) Run **Entity Brief**.
 4) Download the single HTML report from the add-on run.
@@ -18,6 +18,9 @@ A DocumentCloud Add-On that aggregates extracted entities across documents into 
 
 Sample report: `docs/demo/entity-brief-demo.html`
 
+<p>
+  <img src="docs/demo/screenshot-report.png" width="900" alt="Entity Brief report preview" />
+</p>
 <p>
   <img src="docs/demo/screenshot-top-entities.png" width="900" alt="Top entities chart" />
 </p>
@@ -40,15 +43,16 @@ Sample report: `docs/demo/entity-brief-demo.html`
 
 ## Requirements
 
-Documents must have entities extracted before running this Add-On. Use DocumentCloud's built-in entity extraction (**Edit → Entities → Extract entities**) or another extraction Add-On first.
+Documents must have entities extracted before running this Add-On. Use DocumentCloud's built-in entity extraction (**Edit -> Entities -> Extract entities**) or another extraction Add-On first.
 
 ## Output Sections
 
 - Run Certificate (UUID, version, doc/page counts, runtime).
 - Top Entities chart (doc coverage).
-- Top Connections list (co-occurrence).
+- Top Connections list (co-occurrence with page examples).
 - Entity Index (doc links, pages, sample snippets).
 - Skipped (no entities) and Failures.
+- Low entity coverage warning (when too few docs have entities).
 
 ## How to read the report
 
@@ -57,16 +61,17 @@ Documents must have entities extracted before running this Add-On. Use DocumentC
 
 ## Features
 
-- **Top Entities Chart** — D3 bar chart showing entities by document coverage
-- **Connection Analysis** — Co-occurrence pairs (entities appearing together)
-- **Entity Index** — Expandable list with doc links, page refs, and evidence snippets
+- **Top Entities Chart** - D3 bar chart showing entities by document coverage
+- **Connection Analysis** - Page-level co-occurrence pairs with example pages
+- **Entity Index** - Expandable list with doc links, page refs, and evidence snippets
+- **Filters & Exports** - Filter by kind/coverage, stoplist names, and export CSV/JSON from the report
 
 ## Configuration
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | Max documents | 25 | Safety cap for query runs |
-| Min relevance | 0.15 | Filter threshold (0.0–1.0) |
+| Min relevance | 0.15 | Filter threshold (0.0-1.0) |
 | Top N entities | 15 | Chart/list size limit |
 | Include connections | true | Enable co-occurrence analysis |
 
