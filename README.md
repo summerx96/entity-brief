@@ -30,16 +30,19 @@ Sample report: `docs/demo/entity-brief-demo.html`
 
 ## What it does
 
-- Reads existing entities for the selected/query documents.
-- Normalizes and aggregates entities across documents.
-- Builds a single HTML report with a run certificate, top entities chart, co-occurrence list, and an entity index.
-- Uploads that report to the add-on run via `upload_file()`.
+Entity Brief turns DocumentCloud entity extractions into a single investigative brief:
+
+- Pulls existing entities from the selected/query documents (no extraction step inside this add-on).
+- Normalizes and aggregates entity names across documents, highlighting cross-document coverage.
+- Ranks top entities and surfaces co-occurrence connections with page-level examples.
+- Produces a single HTML report with a run certificate, document list, charts, and an entity index.
+- Provides client-side filters/exports, a support letter draft, and optional metadata writeback.
 
 ## What it does not do
 
 - It does not extract entities itself (run entity extraction first).
 - It does not upload documents.
-- It does not write tags or other metadata back to documents in v1.
+- It does not modify documents unless writeback is explicitly enabled.
 
 ## Requirements
 
@@ -48,11 +51,15 @@ Documents must have entities extracted before running this Add-On. Use DocumentC
 ## Output Sections
 
 - Run Certificate (UUID, version, doc/page counts, runtime).
+- Documents in this run (IDs, pages, entity status).
 - Top Entities chart (doc coverage).
 - Top Connections list (co-occurrence with page examples).
+- Possible duplicates (alias suggestions).
+- Document tags (optional writeback summary + copyable tags).
 - Entity Index (doc links, pages, sample snippets).
 - Skipped (no entities) and Failures.
 - Low entity coverage warning (when too few docs have entities).
+- Support letter draft + feedback tools (client-side).
 
 ## How to read the report
 
@@ -65,6 +72,10 @@ Documents must have entities extracted before running this Add-On. Use DocumentC
 - **Connection Analysis** - Page-level co-occurrence pairs with example pages
 - **Entity Index** - Expandable list with doc links, page refs, and evidence snippets
 - **Filters & Exports** - Filter by kind/coverage, stoplist names, and export CSV/JSON from the report
+- **Alias Suggestions** - Heuristic duplicate detection to help reconcile name variants
+- **Support Letter Draft** - Client-side letter builder with copy/email actions (optional)
+- **Writeback Tags (opt-in)** - Store top entity tags in DocumentCloud metadata per document
+- **Documents List** - Shows the documents included in the run with ID, pages, and entity status
 
 ## Configuration
 
@@ -74,6 +85,9 @@ Documents must have entities extracted before running this Add-On. Use DocumentC
 | Min relevance | 0.15 | Filter threshold (0.0-1.0) |
 | Top N entities | 15 | Chart/list size limit |
 | Include connections | true | Enable co-occurrence analysis |
+| Writeback tags | false | Store top entity tags in `data.entity_brief.tags` |
+| Writeback tag limit | 5 | Tags per document when writeback is enabled |
+| Writeback tag prefix | entity: | Prefix prepended to each stored tag |
 
 ## Output
 
@@ -87,6 +101,7 @@ Note: D3 charts render in a browser. IDE previews that do not run JS will not sh
 - No third-party API calls beyond DocumentCloud
 - No telemetry or data collection
 - Report loads D3.js from CDN when viewed
+- Optional writeback stores tags in DocumentCloud metadata (`data.entity_brief.tags`)
 
 ## Local Development
 

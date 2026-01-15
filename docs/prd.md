@@ -39,7 +39,7 @@ They hate:
 ## Outputs
 - One HTML report (downloadable from the Add-On run)
 - Report-first: primary output is a human-readable brief for sharing and verification (with optional client-side exports).
-- Optional tags written back to documents (vNext; deferred in this version)
+- Optional tags written back to documents (opt-in in this version; stored at `data.entity_brief.tags`).
 - Add-On constraint: one file per run; ship a single HTML file for MVP
 - Feedback form and telemetry are deferred to the next version.
 - Report includes a "Skipped (no entities)" section for docs without extracted entities.
@@ -60,6 +60,7 @@ They hate:
   - Total mentions
   - Doc coverage (# docs containing it)
   - Per-doc breakdown with doc links + page refs (receipts, linked to exact pages)
+  - Heuristic duplicate suggestions for alias cleanup (report section)
 
 ### F2 - Two simple visuals (D3 constraint)
 - Bar chart (D3): Top 15 entities by doc coverage
@@ -78,6 +79,10 @@ Include:
 - "Copy summary" button
 - Mailto: "Send summary to developer" link
 - Feedback form link (vNext; disabled in this version)
+- Support letter draft + feedback notes (client-side only, no external form)
+
+### F3b - Documents in this run
+- List the documents included (title, ID, page count, entity status)
 
 ### F4 - Trust and permissions UX (critical for adoption)
 - Clearly state: only selected/query docs are processed
@@ -89,7 +94,15 @@ Include:
 - Stoplist for noisy names (client-side)
 - Exports from the HTML report (entity index CSV, connections CSV/JSON)
 
-### F6 - Optional opt-in anonymous telemetry (vNext)
+### F6 - Optional writeback tags (opt-in)
+- Store per-document top entity tags in DocumentCloud metadata (`data.entity_brief.tags`)
+- Report lists suggested tags and writeback summary
+
+### F7 - Support letter draft + feedback (client-side)
+- Draft a usage letter with run stats and optional improvement requests
+- Copy or email draft via mailto (no automatic sending)
+
+### F8 - Optional opt-in anonymous telemetry (vNext)
 Deferred for the current version. When enabled, POST only:
 - run_uuid
 - addon_version
@@ -102,7 +115,7 @@ Never send:
 - Entity strings
 - Any document text
 
-### F6 - Email summary to the user (vNext)
+### F9 - Email summary to the user (vNext)
 Deferred for the current version.
 
 ## Success metrics (NIW-friendly)

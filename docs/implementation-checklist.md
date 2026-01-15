@@ -3,10 +3,10 @@
 This document is a commit-by-commit instruction set. Follow the commits in order. Each commit should be ~300 lines of code or less; if you exceed that, stop and split the remaining tasks into the next commit.
 
 ## Global rules (read before starting)
-- Do not create or replace `config.yaml`. It already exists. Only read its property names.
+- Do not create or replace `config.yaml`. It already exists. Update it only when adding new user-facing options.
 - Only one output file per run (HTML).
 - Telemetry and feedback form are disabled in this version.
-- Document tagging is deferred (do not implement in v1).
+- Document tag writeback is optional and must be opt-in.
 - Keep changes limited to the files listed in each commit.
 - Always update docs when code changes (same commit).
 - Run the verification command listed for each commit before committing.

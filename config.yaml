@@ -5,6 +5,7 @@ description: >
   <p><em>Privacy:</em> This version does not send document text, entity strings, or usage metrics outside DocumentCloud/GitHub Actions.</p>
 instructions: >
   <p><strong>Tip:</strong> For best results, run DocumentCloud's entity extraction first (if your documents do not have entities yet).</p>
+  <p>Optional: enable writeback to store top entity tags in DocumentCloud metadata.</p>
 
 documents:
   - selected
@@ -39,5 +40,23 @@ properties:
     title: "Include top co-occurrence connections"
     description: "Shows which entities appear together across the same documents."
     default: true
+
+  writeback_tags:
+    type: boolean
+    title: "Write back top entity tags to document metadata"
+    description: "If enabled, stores top entity tags per doc under data.entity_brief.tags."
+    default: false
+
+  writeback_tag_limit:
+    type: number
+    title: "Tags per document (writeback)"
+    description: "Number of top entities to tag per document when writeback is enabled."
+    default: 5
+
+  writeback_tag_prefix:
+    type: string
+    title: "Tag prefix (writeback)"
+    description: "Prefix to add before each tag stored in data.entity_brief.tags (e.g., entity:)."
+    default: "entity:"
 
 required: []

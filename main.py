@@ -5,7 +5,8 @@ import os
 import re
 import time
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -22,6 +23,25 @@ DEVELOPER_EMAIL = os.environ.get("ENTITY_BRIEF_DEV_EMAIL", "summerxie966@gmail.c
 
 D3_CDN = "https://d3js.org/d3.v7.min.js"
 ENTITY_COVERAGE_WARN_THRESHOLD = 0.4
+DUPE_SUGGESTIONS_LIMIT = 20
+DUPE_POOL_LIMIT = 200
+WRITEBACK_TAG_LIMIT_DEFAULT = 5
+
+KIND_ALIASES = {
+    "person": "Person",
+    "people": "Person",
+    "org": "Organization",
+    "organization": "Organization",
+    "company": "Organization",
+    "location": "Location",
+    "place": "Location",
+    "geo": "Location",
+    "date": "Date",
+    "time": "Date",
+}
+PERSON_PREFIXES = {"mr", "mrs", "ms", "dr", "prof", "hon", "sir", "madam"}
+PERSON_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+ORG_SUFFIXES = {"inc", "incorporated", "llc", "ltd", "limited", "co", "company", "corp", "corporation", "plc"}
 
 
 # ---- Helpers ----
@@ -111,21 +131,68 @@ def _api_get_all_pages(
     return out
 
 
-def _normalize_name(s: str) -> str:
+def _normalize_kind(kind: str) -> str:
+    kind = (kind or "").strip()
+    if not kind:
+        return "Other"
+    mapped = KIND_ALIASES.get(kind.lower())
+    return mapped or kind
+
+
+def _strip_tokens(tokens: List[str], prefixes: set, suffixes: set) -> List[str]:
+    while tokens and tokens[0] in prefixes:
+        tokens = tokens[1:]
+    while tokens and tokens[-1] in suffixes:
+        tokens = tokens[:-1]
+    return tokens
+
+
+def _strip_org_suffixes(tokens: List[str]) -> List[str]:
+    while tokens and tokens[-1] in ORG_SUFFIXES:
+        tokens = tokens[:-1]
+    return tokens
+
+
+def _normalize_name(s: str, kind: str = "") -> str:
+    if not s:
+        return ""
     s = s.strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    # Keep letters/numbers/basic punctuation; remove noisy quotes
     s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
-    return s
+    s = s.replace(".", "")
+    s = re.sub(r"[^\w\s&]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    tokens = s.split()
+    if kind:
+        kind_norm = kind.lower()
+        if kind_norm in ("person", "people"):
+            tokens = _strip_tokens(tokens, PERSON_PREFIXES, PERSON_SUFFIXES)
+        elif kind_norm in ("organization", "org", "company"):
+            tokens = _strip_org_suffixes(tokens)
+    return " ".join(tokens)
+
+
+def _name_acronym(name: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", name or "")
+    letters = [t[0] for t in tokens if t and not t.isdigit()]
+    return "".join(letters).upper()
+
+
+def _is_acronym_name(name: str) -> bool:
+    if not name:
+        return False
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", name)
+    if not cleaned or len(cleaned) > 6:
+        return False
+    return cleaned.isupper()
 
 
 def _entity_key(ent: Dict[str, Any]) -> Tuple[str, str]:
     """
     Best-effort canonicalization:
     - Prefer stable IDs if present (mid/wiki_url)
-    - Else normalized surface form
+    - Else normalized surface form with kind-aware cleanup
     """
-    kind = str(ent.get("kind", "Other"))
+    kind = _normalize_kind(str(ent.get("kind", "Other")))
     # Common fields from entity systems (may/may not exist depending on extractor)
     mid = ent.get("mid") or ent.get("knowledge_graph_mid")
     wikidata = ent.get("wikidata_id")
@@ -137,7 +204,7 @@ def _entity_key(ent: Dict[str, Any]) -> Tuple[str, str]:
     if wiki:
         return (kind, f"wiki:{wiki}")
     val = str(ent.get("value") or ent.get("name") or "")
-    return (kind, f"v:{_normalize_name(val)}")
+    return (kind, f"v:{_normalize_name(val, kind)}")
 
 
 def _entity_display(ent: Dict[str, Any]) -> str:
@@ -155,6 +222,72 @@ def _escape(s: str) -> str:
     return html.escape(s or "", quote=True)
 
 
+def _find_possible_duplicates(entities: List[Dict[str, Any]], min_ratio: float = 0.9) -> List[Dict[str, Any]]:
+    entries = []
+    for ent in entities[:DUPE_POOL_LIMIT]:
+        name = str(ent.get("name") or "")
+        kind = str(ent.get("kind") or "Other")
+        norm = _normalize_name(name, kind)
+        compact = norm.replace(" ", "")
+        tokens = set(norm.split())
+        acronym = _name_acronym(name)
+        entries.append({
+            "key": ent.get("key"),
+            "name": name,
+            "kind": kind,
+            "doc_count": int(ent.get("doc_count") or 0),
+            "norm": norm,
+            "compact": compact,
+            "tokens": tokens,
+            "acronym": acronym,
+            "is_acronym": _is_acronym_name(name),
+        })
+
+    suggestions: List[Dict[str, Any]] = []
+    seen = set()
+    for i in range(len(entries)):
+        for j in range(i + 1, len(entries)):
+            a = entries[i]
+            b = entries[j]
+            if a["kind"] != b["kind"]:
+                continue
+            if a["key"] == b["key"]:
+                continue
+            reason = ""
+            if a["compact"] and a["compact"] == b["compact"]:
+                reason = "normalized match"
+            elif a["acronym"] and a["acronym"] == b["acronym"] and (a["is_acronym"] or b["is_acronym"]):
+                reason = f"acronym match ({a['acronym']})"
+            else:
+                if a["tokens"] and b["tokens"] and (a["tokens"] & b["tokens"]):
+                    ratio = SequenceMatcher(None, a["norm"], b["norm"]).ratio()
+                    if ratio >= min_ratio:
+                        reason = f"similar names ({ratio:.2f})"
+            if reason:
+                pair_key = tuple(sorted([a["key"], b["key"]]))
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                suggestions.append({
+                    "kind": a["kind"],
+                    "a_name": a["name"],
+                    "b_name": b["name"],
+                    "a_docs": a["doc_count"],
+                    "b_docs": b["doc_count"],
+                    "reason": reason,
+                })
+                if len(suggestions) >= DUPE_SUGGESTIONS_LIMIT:
+                    return suggestions
+    return suggestions
+
+
+def _apply_tag_prefix(prefix: str, name: str) -> str:
+    prefix = (prefix or "").strip()
+    if not prefix:
+        return name
+    return f"{prefix}{name}"
+
+
 class EntityBrief(AddOn):
     def main(self):
         start_ts = time.time()
@@ -166,6 +299,11 @@ class EntityBrief(AddOn):
         min_rel = _safe_float(data.get("min_relevance", 0.15), 0.15)
         top_n = _safe_int(data.get("top_n_entities", 15), 15)
         include_connections = bool(data.get("include_connections", True))
+        writeback_tags = bool(data.get("writeback_tags", False))
+        writeback_tag_limit = _safe_int(data.get("writeback_tag_limit", WRITEBACK_TAG_LIMIT_DEFAULT),
+                                        WRITEBACK_TAG_LIMIT_DEFAULT)
+        writeback_tag_limit = max(writeback_tag_limit, 0)
+        writeback_tag_prefix = str(data.get("writeback_tag_prefix", "entity:") or "entity:").strip()
 
         # ---- Fetch docs ----
         self.set_message("Collecting documents...")
@@ -182,6 +320,9 @@ class EntityBrief(AddOn):
             title = str(getattr(doc, "title", "")) or f"Document {doc_id}"
             canonical_url = str(getattr(doc, "canonical_url", ""))
             page_count = int(getattr(doc, "page_count", 0) or 0)
+            doc_data = getattr(doc, "data", None)
+            if not isinstance(doc_data, dict):
+                doc_data = {}
             total_pages += page_count
 
             doc_meta[doc_id] = {
@@ -189,6 +330,7 @@ class EntityBrief(AddOn):
                 "title": title,
                 "url": canonical_url,
                 "page_count": page_count,
+                "data": doc_data,
             }
 
             self.set_progress(int(i / max(len(docs), 1) * 10))
@@ -251,7 +393,7 @@ class EntityBrief(AddOn):
             for ent in ents:
                 try:
                     payload = _entity_payload(ent)
-                    kind = str(payload.get("kind", "Other"))
+                    kind = _normalize_kind(str(payload.get("kind", "Other")))
                     display = _entity_display(payload)
                     if not display:
                         continue
@@ -309,14 +451,21 @@ class EntityBrief(AddOn):
             if page_entities:
                 doc_page_entities[doc_id] = page_entities
 
-        # Finalize cluster display name
+        # Finalize cluster display name and build per-doc rollups
         cluster_list: List[Dict[str, Any]] = []
+        doc_entities_by_doc: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         for key, c in clusters.items():
             display = c["display_names"].most_common(1)[0][0] if c["display_names"] else key[1]
+            c["display"] = display
             # JSON-ify sets/counters
             docs_out = []
             for did, dd in c["docs"].items():
                 meta = doc_meta.get(did, {"id": did, "title": f"Document {did}", "url": ""})
+                doc_entities_by_doc[did].append({
+                    "name": display,
+                    "kind": c["kind"],
+                    "count": dd["count"],
+                })
                 docs_out.append({
                     "doc_id": did,
                     "title": meta["title"],
@@ -411,10 +560,111 @@ class EntityBrief(AddOn):
                 edges.sort(key=lambda x: (-x.get("page_count", 0), -x.get("doc_count", 0), x["a"], x["b"]))
                 edges = edges[:50]
 
+        # ---- Alias suggestions (heuristic) ----
+        demo_mode = str(run_uuid).startswith("demo")
+        dupe_ratio = 0.88
+        if demo_mode:
+            dupe_ratio = 0.82
+        duplicates = _find_possible_duplicates(cluster_list, min_ratio=dupe_ratio)
+        if demo_mode and not duplicates and cluster_list:
+            sample = [e for e in cluster_list[:5] if e.get("name")]
+            if len(sample) >= 2:
+                duplicates.append({
+                    "kind": sample[0].get("kind", "Other"),
+                    "a_name": sample[0].get("name"),
+                    "b_name": sample[1].get("name"),
+                    "a_docs": sample[0].get("doc_count", 0),
+                    "b_docs": sample[1].get("doc_count", 0),
+                    "reason": "demo preview (no close matches detected)",
+                })
+
+        # ---- Doc tag suggestions + optional writeback ----
+        doc_tags: List[Dict[str, Any]] = []
+        doc_tag_map: Dict[int, List[str]] = {}
+        for did, ent_list in doc_entities_by_doc.items():
+            ent_list.sort(key=lambda x: (-x["count"], x["name"].lower()))
+            limit = writeback_tag_limit if writeback_tag_limit > 0 else 0
+            tags = [e["name"] for e in ent_list[:limit]] if limit else []
+            tag_values = [_apply_tag_prefix(writeback_tag_prefix, t) for t in tags]
+            meta = doc_meta.get(did, {"id": did, "title": f"Document {did}", "url": ""})
+            doc_tags.append({
+                "doc_id": did,
+                "title": meta["title"],
+                "url": meta["url"],
+                "entity_count": len(ent_list),
+                "tags": tags,
+                "tag_values": tag_values,
+            })
+            doc_tag_map[did] = tag_values
+
+        doc_tags.sort(key=lambda x: (-len(x.get("tag_values") or []), x["title"].lower()))
+
+        writeback = {
+            "enabled": writeback_tags,
+            "tag_limit": writeback_tag_limit,
+            "tag_prefix": writeback_tag_prefix,
+            "updated": 0,
+            "skipped": 0,
+            "failures": [],
+        }
+        if writeback_tags:
+            self.set_message("Writing entity tags to document metadata...")
+            for did, tags in doc_tag_map.items():
+                if not tags:
+                    writeback["skipped"] += 1
+                    continue
+                try:
+                    existing = doc_meta.get(did, {}).get("data") or {}
+                    if not isinstance(existing, dict):
+                        existing = {}
+                    entity_brief = existing.get("entity_brief")
+                    if not isinstance(entity_brief, dict):
+                        entity_brief = {}
+                    entity_brief.update({
+                        "run_uuid": run_uuid,
+                        "version": ADDON_VERSION,
+                        "generated_at": int(time.time()),
+                        "tags": tags,
+                        "entity_count": len(doc_entities_by_doc.get(did, [])),
+                    })
+                    updated = dict(existing)
+                    updated["entity_brief"] = entity_brief
+                    self.client.patch(f"documents/{did}/", json={"data": updated})
+                    writeback["updated"] += 1
+                except Exception as e:
+                    writeback["failures"].append({"doc_id": did, "error": str(e)})
+
         # ---- Build report data ----
         runtime_s = round(time.time() - start_ts, 2)
         docs_with_entities = len(doc_entities)
         entity_coverage = (docs_with_entities / len(docs)) if docs else 0
+        skipped_map = {s.get("doc_id"): s.get("reason") for s in skipped}
+        failure_map = {f.get("doc_id"): f.get("error") for f in failures}
+        documents_out: List[Dict[str, Any]] = []
+        for doc in docs:
+            doc_id = int(getattr(doc, "id"))
+            meta = doc_meta.get(doc_id, {"id": doc_id, "title": f"Document {doc_id}", "url": "", "page_count": 0})
+            if doc_id in doc_entities:
+                status = "entities present"
+                reason = ""
+            elif doc_id in failure_map:
+                status = "failed"
+                reason = failure_map.get(doc_id, "")
+            elif doc_id in skipped_map:
+                status = "skipped"
+                reason = skipped_map.get(doc_id, "")
+            else:
+                status = "no entities"
+                reason = ""
+            documents_out.append({
+                "doc_id": doc_id,
+                "title": meta.get("title", f"Document {doc_id}"),
+                "url": meta.get("url", ""),
+                "page_count": int(meta.get("page_count") or 0),
+                "entity_count": len(doc_entities_by_doc.get(doc_id, [])),
+                "status": status,
+                "reason": reason,
+            })
         report_data = {
             "run": {
                 "uuid": run_uuid,
@@ -435,6 +685,10 @@ class EntityBrief(AddOn):
             "top_entities": cluster_list[: max(top_n, 5)],
             "entities": cluster_list[:500],
             "edges": edges,
+            "documents": documents_out,
+            "duplicates": duplicates,
+            "doc_tags": doc_tags,
+            "writeback": writeback,
             "skipped": skipped,
             "failures": failures,
         }
@@ -473,6 +727,7 @@ class EntityBrief(AddOn):
         <img src="screenshot-entity-index.png" alt="Entity index preview" style="width: 100%; max-width: 900px; border: 1px solid #eee; border-radius: 8px;" />
       </div>"""
         coverage_warning_block = ""
+        coverage_preview_block = ""
         docs_processed = int(run.get("docs_processed", 0) or 0)
         entity_docs = int(run.get("entity_docs", 0) or 0)
         entity_coverage = float(run.get("entity_coverage", 0) or 0)
@@ -490,6 +745,21 @@ class EntityBrief(AddOn):
       <li>Wait for extraction to finish, then re-run Entity Brief.</li>
       <li>Docs without entities appear under <strong>Skipped (no entities)</strong>.</li>
     </ol>
+  </div>"""
+        elif demo_mode:
+            threshold_pct = int(ENTITY_COVERAGE_WARN_THRESHOLD * 100)
+            coverage_preview_block = f"""
+  <div class="card">
+    <h3>Low entity coverage (preview)</h3>
+    <p class="small muted">This warning appears when fewer than {threshold_pct}% of docs have entities.</p>
+    <div class="card warn">
+      <p class="small"><strong>What to run first:</strong></p>
+      <ol class="small">
+        <li>Open a document and run <em>Edit -> Entities -> Extract entities</em> (or run the Google Cloud Entity Extractor add-on).</li>
+        <li>Wait for extraction to finish, then re-run Entity Brief.</li>
+        <li>Docs without entities appear under <strong>Skipped (no entities)</strong>.</li>
+      </ol>
+    </div>
   </div>"""
 
         # Note: we keep D3 via CDN for MVP. If you want fully offline reports, embed d3.v7.min.js later.
@@ -518,6 +788,9 @@ class EntityBrief(AddOn):
     .controls {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }}
     label {{ display: block; font-weight: 600; margin-bottom: 4px; }}
     select, textarea, input[type="text"], input[type="range"] {{ width: 100%; }}
+    .support-block {{ margin-top: 12px; }}
+    .btn.small {{ font-size: 0.85em; padding: 6px 8px; }}
+    textarea[readonly] {{ background: #fafafa; }}
   </style>
 </head>
 <body>
@@ -547,6 +820,80 @@ class EntityBrief(AddOn):
           &nbsp;
           <a class="btn" id="mailtoLink" href="#">Email summary to developer</a>
         </p>
+
+        <div class="support-block">
+          <h4>Quick feedback (optional)</h4>
+          <label for="feedbackNotes">Notes for the developer</label>
+          <textarea id="feedbackNotes" rows="2" placeholder="What worked well? What was noisy?"></textarea>
+          <p>
+            <button class="btn small" id="copyFeedback" type="button">Copy feedback</button>
+            <a class="btn small" id="mailtoFeedback" href="#">Email summary + feedback</a>
+          </p>
+        </div>
+
+        <details class="support-block" id="supportLetter">
+          <summary><strong>Generate support letter draft (optional)</strong></summary>
+          <p class="small muted">No data leaves this report unless you copy or email it.</p>
+          <div class="controls">
+            <div>
+              <label for="supportName">Name</label>
+              <input type="text" id="supportName" placeholder="Jane Doe" />
+            </div>
+            <div>
+              <label for="supportRole">Role / Title</label>
+              <input type="text" id="supportRole" placeholder="Investigative Reporter" />
+            </div>
+            <div>
+              <label for="supportOrg">Organization</label>
+              <input type="text" id="supportOrg" placeholder="Newsroom or nonprofit" />
+            </div>
+            <div>
+              <label for="supportEmail">Email</label>
+              <input type="text" id="supportEmail" placeholder="name@organization.org" />
+            </div>
+            <div>
+              <label for="supportTimeSaved">Time saved (optional)</label>
+              <input type="text" id="supportTimeSaved" placeholder="e.g., 2 hours" />
+            </div>
+          </div>
+          <div class="controls">
+            <div>
+              <label for="supportQuote">Permission to quote</label>
+              <select id="supportQuote">
+                <option value="Yes">Yes</option>
+                <option value="No">No</option>
+              </select>
+            </div>
+            <div>
+              <label for="supportLetterhead">Signed letter on letterhead?</label>
+              <select id="supportLetterhead">
+                <option value="Yes">Yes</option>
+                <option value="No">No</option>
+              </select>
+            </div>
+          </div>
+          <div class="support-block">
+            <label>Requested improvements (optional)</label>
+            <label class="small"><input type="checkbox" class="supportImprovement" value="Improved entity resolution and alias merging" /> Improved entity resolution and alias merging</label><br/>
+            <label class="small"><input type="checkbox" class="supportImprovement" value="Write back entity tags to DocumentCloud metadata" /> Write back entity tags to DocumentCloud metadata</label><br/>
+            <label class="small"><input type="checkbox" class="supportImprovement" value="Noise controls (filters, stoplists, sorting)" /> Noise controls (filters, stoplists, sorting)</label><br/>
+            <label class="small"><input type="checkbox" class="supportImprovement" value="Page-level co-occurrence connections with example pages" /> Page-level co-occurrence connections with example pages</label><br/>
+            <label class="small"><input type="checkbox" class="supportImprovement" value="Additional export formats for collaboration" /> Additional export formats for collaboration</label>
+          </div>
+          <div class="support-block">
+            <label for="supportNotes">Impact summary (optional)</label>
+            <textarea id="supportNotes" rows="2" placeholder="Example: helped triage a 90-page FOIA release and surface recurring names quickly."></textarea>
+          </div>
+          <div class="support-block">
+            <label for="supportLetterText">Draft letter</label>
+            <textarea id="supportLetterText" rows="10" readonly></textarea>
+          </div>
+          <p>
+            <button class="btn small" id="buildSupportLetter" type="button">Generate letter</button>
+            <button class="btn small" id="copySupportLetter" type="button">Copy letter</button>
+            <a class="btn small" id="mailtoSupportLetter" href="#">Open email draft</a>
+          </p>
+        </details>
       </div>
 
       <div class="card warn">
@@ -555,12 +902,19 @@ class EntityBrief(AddOn):
           <li>This report is generated from the documents selected for this run.</li>
           <li>By default, no document text is sent to any external service by this Add-On.</li>
           <li>This version does not send usage metrics.</li>
+          <li>If writeback is enabled, top entity tags are stored in DocumentCloud metadata (<code>data.entity_brief.tags</code>).</li>
         </ul>
       </div>
     </div>
   </div>
 
   {coverage_warning_block}
+  {coverage_preview_block}
+
+  <div class="card">
+    <h2>Documents in this run</h2>
+    <div id="documentsList"></div>
+  </div>
 
   <div class="card">
     <h2>Filters & exports</h2>
@@ -614,6 +968,22 @@ class EntityBrief(AddOn):
       <div id="connections"></div>
       <p class="small muted">Pairs that appear together on the same pages when page data is available.</p>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Possible duplicates (alias suggestions)</h2>
+    <div id="duplicateSuggestions"></div>
+    <p class="small muted">Heuristic suggestions only - review before treating them as the same entity.</p>
+  </div>
+
+  <div class="card">
+    <h2>Document tags (optional writeback)</h2>
+    <p class="small muted">
+      Top entities per document. If enabled in add-on settings, tags are written to document metadata at
+      <code>data.entity_brief.tags</code>.
+    </p>
+    <div id="writebackSummary"></div>
+    <div id="docTags"></div>
   </div>
 
   <div class="card">
@@ -674,6 +1044,15 @@ class EntityBrief(AddOn):
     const demoIndexFallback = document.getElementById("indexFallback");
 
     // ---- Share helpers ----
+    async function copyText(text, successMessage) {{
+      try {{
+        await navigator.clipboard.writeText(text);
+        alert(successMessage || "Copied to clipboard.");
+      }} catch (err) {{
+        alert("Copy failed (browser permission). You can manually select the text and copy.");
+      }}
+    }}
+
     function runSummaryText() {{
       const r = DATA.run;
       return [
@@ -693,21 +1072,165 @@ class EntityBrief(AddOn):
       ].join("\\n");
     }}
 
-    document.getElementById("copyBtn").addEventListener("click", async (e) => {{
-      e.preventDefault();
-      try {{
-        await navigator.clipboard.writeText(runSummaryText());
-        alert("Copied run summary to clipboard.");
-      }} catch (err) {{
-        alert("Copy failed (browser permission). You can manually select text in the Run Certificate block.");
-      }}
-    }});
+    const devEmail = (DATA.meta && DATA.meta.developer_email) ? String(DATA.meta.developer_email) : "";
+    const copyBtn = document.getElementById("copyBtn");
+    if (copyBtn) {{
+      copyBtn.addEventListener("click", async (e) => {{
+        e.preventDefault();
+        await copyText(runSummaryText(), "Copied run summary to clipboard.");
+      }});
+    }}
 
-    const mailto = `mailto:${{encodeURIComponent(DATA.meta.developer_email)}}?subject=${{encodeURIComponent("Entity Brief feedback (" + DATA.run.uuid + ")")}}&body=${{encodeURIComponent(runSummaryText())}}`;
-    document.getElementById("mailtoLink").setAttribute("href", mailto);
+    const mailtoLink = document.getElementById("mailtoLink");
+    if (mailtoLink && devEmail) {{
+      const mailto = `mailto:${{encodeURIComponent(devEmail)}}?subject=${{encodeURIComponent("Entity Brief feedback (" + DATA.run.uuid + ")")}}&body=${{encodeURIComponent(runSummaryText())}}`;
+      mailtoLink.setAttribute("href", mailto);
+    }} else if (mailtoLink) {{
+      mailtoLink.style.display = "none";
+    }}
+
+    const feedbackNotes = document.getElementById("feedbackNotes");
+    const copyFeedbackBtn = document.getElementById("copyFeedback");
+    const mailtoFeedback = document.getElementById("mailtoFeedback");
+
+    function feedbackText() {{
+      const notes = feedbackNotes ? String(feedbackNotes.value || "").trim() : "";
+      if (!notes) {{
+        return runSummaryText();
+      }}
+      return `${{runSummaryText()}}\\n\\nFeedback:\\n${{notes}}`;
+    }}
+
+    function updateFeedbackMailto() {{
+      if (!mailtoFeedback || !devEmail) {{
+        if (mailtoFeedback) {{
+          mailtoFeedback.style.display = "none";
+        }}
+        return;
+      }}
+      const mailto = `mailto:${{encodeURIComponent(devEmail)}}?subject=${{encodeURIComponent("Entity Brief feedback (" + DATA.run.uuid + ")")}}&body=${{encodeURIComponent(feedbackText())}}`;
+      mailtoFeedback.setAttribute("href", mailto);
+    }}
+
+    if (copyFeedbackBtn) {{
+      copyFeedbackBtn.addEventListener("click", async (e) => {{
+        e.preventDefault();
+        await copyText(feedbackText(), "Copied feedback to clipboard.");
+      }});
+    }}
+    if (feedbackNotes) {{
+      feedbackNotes.addEventListener("input", updateFeedbackMailto);
+    }}
+    updateFeedbackMailto();
+
+    const supportLetterTextArea = document.getElementById("supportLetterText");
+    const buildSupportLetterBtn = document.getElementById("buildSupportLetter");
+    const copySupportLetterBtn = document.getElementById("copySupportLetter");
+    const mailtoSupportLetter = document.getElementById("mailtoSupportLetter");
+
+    function supportLetterText() {{
+      const name = String(document.getElementById("supportName")?.value || "").trim() || "[Name]";
+      const role = String(document.getElementById("supportRole")?.value || "").trim();
+      const org = String(document.getElementById("supportOrg")?.value || "").trim();
+      const email = String(document.getElementById("supportEmail")?.value || "").trim() || "[Email]";
+      const timeSaved = String(document.getElementById("supportTimeSaved")?.value || "").trim();
+      const quote = String(document.getElementById("supportQuote")?.value || "Yes").trim();
+      const letterhead = String(document.getElementById("supportLetterhead")?.value || "No").trim();
+      const impact = String(document.getElementById("supportNotes")?.value || "").trim();
+      const improvements = Array.from(document.querySelectorAll(".supportImprovement:checked"))
+        .map(input => input.value)
+        .filter(Boolean);
+
+      const r = DATA.run;
+      const docsCount = r.docs_processed || 0;
+      const pagesCount = r.pages_processed || 0;
+      const runtime = r.runtime_seconds || 0;
+
+      let identity = name;
+      if (role && org) {{
+        identity += ", " + role + " at " + org;
+      }} else if (role) {{
+        identity += ", " + role;
+      }} else if (org) {{
+        identity += ", " + org;
+      }}
+
+      let impactSentence = "";
+      if (impact) {{
+        impactSentence = "In practical terms, this workflow helped me " + impact;
+      }} else {{
+        impactSentence = "In practical terms, this workflow helped me triage the release and share findings with collaborators";
+      }}
+      if (timeSaved) {{
+        impactSentence += ", saving approximately " + timeSaved + ".";
+      }} else {{
+        impactSentence += ".";
+      }}
+
+      let letter = "";
+      letter += "To Whom It May Concern,\\n\\n";
+      letter += "My name is " + identity + ". In my work involving public records / FOIA document review, I used the Entity Brief DocumentCloud add-on to analyze a multi-document release.\\n\\n";
+      letter += "Using Entity Brief, I generated a cross-document entity report covering " + docsCount + " documents (" + pagesCount + " pages) in approximately " + runtime + " seconds. The report summarized recurring people/organizations/locations across the set and provided page-level references that made it faster to locate key entities.\\n\\n";
+      letter += impactSentence + "\\n\\n";
+      letter += "Tools like Entity Brief support investigative and civic transparency work by reducing the time required to triage large public records and by making it easier to locate relevant material across document sets.\\n\\n";
+      if (improvements.length) {{
+        letter += "Optional requested improvements:\\n";
+        for (const item of improvements) {{
+          letter += "- " + item + "\\n";
+        }}
+        letter += "\\n";
+      }}
+      letter += "Sincerely,\\n" + name + "\\n" + (role || "[Role/Title]") + (org ? ", " + org : "") + "\\n" + email + "\\n";
+      letter += "Permission to quote: " + quote + "\\nWilling to provide signed letter on letterhead: " + letterhead + "\\n";
+      return letter;
+    }}
+
+    function updateSupportLetter() {{
+      if (!supportLetterTextArea) {{
+        return;
+      }}
+      const text = supportLetterText();
+      supportLetterTextArea.value = text;
+      if (mailtoSupportLetter && devEmail) {{
+        const subject = "Entity Brief support letter (" + DATA.run.uuid + ")";
+        const mailto = `mailto:${{encodeURIComponent(devEmail)}}?subject=${{encodeURIComponent(subject)}}&body=${{encodeURIComponent(text)}}`;
+        mailtoSupportLetter.setAttribute("href", mailto);
+      }} else if (mailtoSupportLetter) {{
+        mailtoSupportLetter.style.display = "none";
+      }}
+    }}
+
+    if (buildSupportLetterBtn) {{
+      buildSupportLetterBtn.addEventListener("click", (e) => {{
+        e.preventDefault();
+        updateSupportLetter();
+      }});
+    }}
+    if (copySupportLetterBtn) {{
+      copySupportLetterBtn.addEventListener("click", async (e) => {{
+        e.preventDefault();
+        if (supportLetterTextArea && !supportLetterTextArea.value) {{
+          updateSupportLetter();
+        }}
+        if (supportLetterTextArea) {{
+          await copyText(supportLetterTextArea.value, "Copied support letter to clipboard.");
+        }}
+      }});
+    }}
+    if (mailtoSupportLetter && devEmail) {{
+      mailtoSupportLetter.addEventListener("click", () => {{
+        if (supportLetterTextArea && !supportLetterTextArea.value) {{
+          updateSupportLetter();
+        }}
+      }});
+    }}
 
     const ENTITIES = DATA.entities || [];
     const EDGES = DATA.edges || [];
+    const DUPES = DATA.duplicates || [];
+    const DOC_TAGS = DATA.doc_tags || [];
+    const WRITEBACK = DATA.writeback || {{}};
+    const DOCS = DATA.documents || [];
 
     const kindFilter = document.getElementById("kindFilter");
     const coverageFilter = document.getElementById("coverageFilter");
@@ -967,6 +1490,110 @@ class EntityBrief(AddOn):
       }}
     }}
 
+    function renderDuplicates() {{
+      const dupDiv = document.getElementById("duplicateSuggestions");
+      if (!dupDiv) {{
+        return;
+      }}
+      if (!DUPES.length) {{
+        dupDiv.innerHTML = "<p class='muted small'>No duplicate suggestions found.</p>";
+        return;
+      }}
+      let html = "<table><thead><tr><th>Kind</th><th>Entity A</th><th>Entity B</th><th>Reason</th></tr></thead><tbody>";
+      for (const d of DUPES) {{
+        html += `<tr><td>${{escapeHtml(d.kind)}}</td><td>${{escapeHtml(d.a_name)}} (docs: ${{escapeHtml(d.a_docs)}})</td><td>${{escapeHtml(d.b_name)}} (docs: ${{escapeHtml(d.b_docs)}})</td><td>${{escapeHtml(d.reason)}}</td></tr>`;
+      }}
+      html += "</tbody></table>";
+      dupDiv.innerHTML = html;
+    }}
+
+    function renderWritebackSummary() {{
+      const summaryDiv = document.getElementById("writebackSummary");
+      if (!summaryDiv) {{
+        return;
+      }}
+      if (!WRITEBACK || !WRITEBACK.enabled) {{
+        summaryDiv.innerHTML = "<p class='muted small'>Writeback is off. Enable writeback in the add-on settings to store tags in DocumentCloud metadata.</p>";
+        return;
+      }}
+      const failures = WRITEBACK.failures || [];
+      let html = `<p class="small">Writeback enabled: updated ${{WRITEBACK.updated || 0}} docs, skipped ${{WRITEBACK.skipped || 0}}, failures ${{failures.length}}.</p>`;
+      html += `<p class="small muted">Tag limit: ${{WRITEBACK.tag_limit || 0}}. Prefix: <code>${{escapeHtml(WRITEBACK.tag_prefix || "")}}</code></p>`;
+      if (failures.length) {{
+        html += "<details class='small'><summary>Writeback failures</summary><ul>";
+        for (const f of failures.slice(0, 10)) {{
+          html += `<li>Doc ${{escapeHtml(f.doc_id)}}: ${{escapeHtml(f.error)}}</li>`;
+        }}
+        html += "</ul></details>";
+      }}
+      summaryDiv.innerHTML = html;
+    }}
+
+    function renderDocuments() {{
+      const docDiv = document.getElementById("documentsList");
+      if (!docDiv) {{
+        return;
+      }}
+      if (!DOCS.length) {{
+        docDiv.innerHTML = "<p class='muted small'>No documents listed for this run.</p>";
+        return;
+      }}
+      let html = "<table><thead><tr><th>Document</th><th>Pages</th><th>Entities</th><th>Status</th></tr></thead><tbody>";
+      for (const doc of DOCS) {{
+        const url = safeUrl(doc.url);
+        const title = escapeHtml(doc.title || ("Document " + (doc.doc_id || "")));
+        const label = url ? `<a href="${{escapeHtml(url)}}" target="_blank" rel="noreferrer">${{title}}</a>` : title;
+        const docId = doc.doc_id ? ` (ID: ${{escapeHtml(doc.doc_id)}})` : "";
+        const pages = doc.page_count !== undefined ? escapeHtml(doc.page_count) : "-";
+        const entities = doc.entity_count !== undefined ? escapeHtml(doc.entity_count) : "-";
+        const status = escapeHtml(doc.status || "");
+        const reason = doc.reason ? ` <span class="muted">(${{escapeHtml(doc.reason)}})</span>` : "";
+        html += `<tr><td>${{label}}${{docId}}</td><td>${{pages}}</td><td>${{entities}}</td><td>${{status}}${{reason}}</td></tr>`;
+      }}
+      html += "</tbody></table>";
+      docDiv.innerHTML = html;
+    }}
+
+    function renderDocTags() {{
+      const docTagsDiv = document.getElementById("docTags");
+      if (!docTagsDiv) {{
+        return;
+      }}
+      if (!DOC_TAGS.length) {{
+        docTagsDiv.innerHTML = "<p class='muted small'>No tag suggestions available.</p>";
+        return;
+      }}
+      let html = "<table><thead><tr><th>Document</th><th>Tags</th><th></th></tr></thead><tbody>";
+      for (const doc of DOC_TAGS) {{
+        const url = safeUrl(doc.url);
+        const docId = doc.doc_id || "";
+        const title = escapeHtml(doc.title || ("Document " + docId));
+        const link = url ? `<a href="${{escapeHtml(url)}}" target="_blank" rel="noreferrer">${{title}}</a>` : title;
+        const tags = (doc.tag_values || doc.tags || []).join(", ");
+        const tagText = escapeHtml(tags);
+        const copyButton = tags ? `<button class="btn small" type="button" data-tags="${{tagText}}">Copy tags</button>` : "";
+        html += `<tr><td>${{link}}</td><td>${{tagText || "-"}}</td><td>${{copyButton}}</td></tr>`;
+      }}
+      html += "</tbody></table>";
+      docTagsDiv.innerHTML = html;
+      if (!docTagsDiv.dataset.bound) {{
+        docTagsDiv.addEventListener("click", async (event) => {{
+          const target = event.target;
+          if (!(target instanceof HTMLElement)) {{
+            return;
+          }}
+          const button = target.closest("button[data-tags]");
+          if (!button) {{
+            return;
+          }}
+          event.preventDefault();
+          const tags = button.getAttribute("data-tags") || "";
+          await copyText(tags, "Copied tags to clipboard.");
+        }});
+        docTagsDiv.dataset.bound = "true";
+      }}
+    }}
+
     function applyFilters() {{
       const kindValue = kindFilter ? kindFilter.value : "All";
       const minDocs = coverageFilter ? parseInt(coverageFilter.value || "1", 10) : 1;
@@ -1095,6 +1722,10 @@ class EntityBrief(AddOn):
     }}
 
     initControls();
+    renderDocuments();
+    renderDuplicates();
+    renderWritebackSummary();
+    renderDocTags();
 
     // ---- Skipped ----
     const sDiv = document.getElementById("skipped");

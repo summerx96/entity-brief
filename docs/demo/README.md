@@ -10,4 +10,6 @@ Notes:
 - Charts render only when the HTML is opened in a browser (JS required).
 - The demo report includes static image fallbacks if JS/D3 is blocked.
 - The demo report includes filters and export buttons (client-side).
+- The demo report includes duplicate suggestions, tag writeback summary, and support letter UI.
+- The demo report shows the documents included in the run.
 - Optional helper: `python scripts/render_demo_images.py` writes `docs/demo/top-entities.svg` and `docs/demo/entity-index.txt` for screenshot prep (ignored by git).

@@ -6,7 +6,7 @@
 
 ## Data written
 - One HTML report generated per run and returned via `upload_file()`.
-- No tags or document metadata are written back in v1.
+- Optional metadata writeback (opt-in): top entity tags stored in `data.entity_brief.tags`.
 
 ## External calls
 - DocumentCloud API for document metadata and entities.
