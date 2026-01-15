@@ -30,7 +30,7 @@ Outputs:
 
 Implementation steps (do exactly in this order):
 1. Create `main.py` if missing. Add imports: `os`, `time`, `uuid`, `json`, `html`, `re`, `itertools`, `requests`, `collections`, `typing`, `documentcloud.addon.AddOn`.
-2. Define constants near top: `ADDON_VERSION`, `API_BASE`, `D3_CDN`, `METRICS_ENDPOINT`, `FEEDBACK_URL` (blank by default), `DEVELOPER_EMAIL` (default to `summerxie966@gmail.com`).
+2. Define constants near top: `ADDON_VERSION`, `API_BASE`, `METRICS_ENDPOINT`, `FEEDBACK_URL` (blank by default), `DEVELOPER_EMAIL` (default to `summerxie966@gmail.com`).
 3. Add `class EntityBrief(AddOn):` with a `main(self)` that sets a message and exits.
 4. Add the `if __name__ == "__main__": EntityBrief().main()` block.
 5. Ensure `requirements.txt` contains `python-documentcloud>=4.5.0` and `requests>=2.31.0`.
@@ -237,7 +237,7 @@ Acceptance checklist:
 - Report HTML contains Run Certificate fields.
 - JSON is embedded and parseable in the page.
 
-## Commit 7 - D3 visuals + entity index
+## Commit 7 - Self-contained visuals + entity index
 Goal: add the bar chart, connections table, and entity index rendering.
 
 Files to touch:
@@ -250,7 +250,7 @@ Outputs:
 - Interactive chart + connections list + entity index inside HTML.
 
 Implementation steps:
-1. Add D3 bar chart (Top 15 by doc coverage).
+1. Add a self-contained SVG bar chart (Top 15 by doc coverage).
 2. Add connections list/table (Top 20 pairs).
 3. Render entity index with expandable sections:
    - Doc link, mention count, page refs, snippets.

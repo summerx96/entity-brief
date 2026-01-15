@@ -4,7 +4,7 @@
 This repo builds a DocumentCloud Add-On named "Entity Brief". Follow `docs/prd.md` as the product source of truth and keep docs aligned with code.
 
 ## Current decisions (v1)
-- Keep D3 via CDN (`https://d3js.org/d3.v7.min.js`).
+- Keep the HTML report self-contained (no third-party JS/CSS loaded when viewed).
 - Feedback form is disabled (no link shown in the report).
 - Telemetry is disabled (no metrics POST).
 - No automatic "email me when done" functionality.

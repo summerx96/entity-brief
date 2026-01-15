@@ -68,10 +68,10 @@ Documents must have entities extracted before running this Add-On. Use DocumentC
 
 ## Features
 
-- **Top Entities Chart** - D3 bar chart showing entities by document coverage
+- **Top Entities Chart** - Self-contained SVG bar chart showing entities by document coverage
 - **Connection Analysis** - Page-level co-occurrence pairs with example pages
 - **Entity Index** - Expandable list with doc links, page refs, and evidence snippets
-- **Filters & Exports** - Filter by kind/coverage, stoplist names, and export CSV/JSON from the report
+- **Filters & Exports** - Filter by kind/search/coverage, stoplist names, and export CSV/JSON from the report
 - **Alias Suggestions** - Heuristic duplicate detection to help reconcile name variants
 - **Support Letter Draft** - Client-side letter builder with copy/email actions (optional)
 - **Writeback Tags (opt-in)** - Store top entity tags in DocumentCloud metadata per document
@@ -93,14 +93,14 @@ Documents must have entities extracted before running this Add-On. Use DocumentC
 
 Single HTML file: `entity-brief-<run_uuid>.html`
 
-Note: D3 charts render in a browser. IDE previews that do not run JS will not show the chart.
+Note: The report uses client-side JavaScript for interactive filtering and rendering. IDE previews that do not run JS may not show interactive elements.
 
 ## Privacy
 
 - Reads only document metadata and existing entity extractions
 - No third-party API calls beyond DocumentCloud
 - No telemetry or data collection
-- Report loads D3.js from CDN when viewed
+- The downloaded HTML report is self-contained (no third-party JS/CSS is loaded when viewed)
 - Optional writeback stores tags in DocumentCloud metadata (`data.entity_brief.tags`)
 
 ## Local Development

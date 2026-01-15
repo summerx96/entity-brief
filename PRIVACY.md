@@ -10,7 +10,9 @@
 
 ## External calls
 - DocumentCloud API for document metadata and entities.
-- D3 library loaded from the official CDN: `https://d3js.org/d3.v7.min.js`.
+
+## Report viewing
+- The downloaded HTML report is self-contained and does not load third-party JavaScript or CSS when viewed.
 
 ## Telemetry and feedback
 - Telemetry is disabled in v1 (no metrics POST).

@@ -62,8 +62,8 @@ They hate:
   - Per-doc breakdown with doc links + page refs (receipts, linked to exact pages)
   - Heuristic duplicate suggestions for alias cleanup (report section)
 
-### F2 - Two simple visuals (D3 constraint)
-- Bar chart (D3): Top 15 entities by doc coverage
+### F2 - Two simple visuals (self-contained)
+- Bar chart (SVG): Top 15 entities by doc coverage
 - List/table: Top 20 co-occurrence pairs ranked by page/doc count, with example page links
 - No force-graph in MVP
 
@@ -90,6 +90,7 @@ Include:
 
 ### F5 - Filters and exports (client-side)
 - Filter by entity kind
+- Search entity names/aliases
 - Minimum doc coverage slider
 - Stoplist for noisy names (client-side)
 - Exports from the HTML report (entity index CSV, connections CSV/JSON)

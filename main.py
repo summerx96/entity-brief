@@ -20,8 +20,6 @@ API_BASE = os.environ.get("DOCUMENTCLOUD_API_BASE", "https://api.www.documentclo
 METRICS_ENDPOINT = os.environ.get("ENTITY_BRIEF_METRICS_ENDPOINT")  # e.g. https://example.com/api/metrics
 FEEDBACK_URL = os.environ.get("ENTITY_BRIEF_FEEDBACK_URL", "")
 DEVELOPER_EMAIL = os.environ.get("ENTITY_BRIEF_DEV_EMAIL", "summerxie966@gmail.com")
-
-D3_CDN = "https://d3js.org/d3.v7.min.js"
 ENTITY_COVERAGE_WARN_THRESHOLD = 0.4
 DUPE_SUGGESTIONS_LIMIT = 20
 DUPE_POOL_LIMIT = 200
@@ -483,7 +481,9 @@ class EntityBrief(AddOn):
                 "aliases": sorted(list(c["aliases"]))[:25],
                 "total_mentions": c["total_mentions"],
                 "doc_count": c["doc_count"],
-                "docs": docs_out[:10],  # cap
+                # Keep full per-doc coverage for "receipts" (doc/page refs).
+                # The overall run is already safety-capped via max_docs.
+                "docs": docs_out,
             })
 
         cluster_list.sort(key=lambda x: (-x["doc_count"], -x["total_mentions"], x["name"].lower()))
@@ -718,7 +718,7 @@ class EntityBrief(AddOn):
         if demo_mode:
             demo_chart_fallback = """
       <div id="chartFallback" class="small muted" style="margin: 8px 0;">
-        <p class="muted">Demo preview (static image shown if JS/D3 is blocked):</p>
+        <p class="muted">Demo preview (static image shown if JS is blocked):</p>
         <img src="screenshot-top-entities.png" alt="Top entities chart preview" style="width: 100%; max-width: 900px; border: 1px solid #eee; border-radius: 8px;" />
       </div>"""
             demo_index_fallback = """
@@ -762,14 +762,13 @@ class EntityBrief(AddOn):
     </div>
   </div>"""
 
-        # Note: we keep D3 via CDN for MVP. If you want fully offline reports, embed d3.v7.min.js later.
+        # The report should be self-contained (no external JS/CSS fetches on view).
         return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Entity Brief - {html.escape(run["uuid"])}</title>
-  <script src="{D3_CDN}"></script>
   <style>
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; line-height: 1.4; }}
     .muted {{ color: #555; }}
@@ -791,6 +790,9 @@ class EntityBrief(AddOn):
     .support-block {{ margin-top: 12px; }}
     .btn.small {{ font-size: 0.85em; padding: 6px 8px; }}
     textarea[readonly] {{ background: #fafafa; }}
+    #barChart .gridline {{ stroke: #eee; }}
+    #barChart .axis {{ stroke: #333; }}
+    #barChart text {{ fill: #222; font-size: 11px; }}
   </style>
 </head>
 <body>
@@ -901,6 +903,7 @@ class EntityBrief(AddOn):
         <ul class="small">
           <li>This report is generated from the documents selected for this run.</li>
           <li>By default, no document text is sent to any external service by this Add-On.</li>
+          <li>The downloaded HTML report is self-contained (no third-party JS/CSS is loaded when viewed).</li>
           <li>This version does not send usage metrics.</li>
           <li>If writeback is enabled, top entity tags are stored in DocumentCloud metadata (<code>data.entity_brief.tags</code>).</li>
         </ul>
@@ -922,6 +925,11 @@ class EntityBrief(AddOn):
       <div>
         <label for="kindFilter">Entity type</label>
         <select id="kindFilter"></select>
+      </div>
+      <div>
+        <label for="searchFilter">Search entities</label>
+        <input type="text" id="searchFilter" placeholder="Example: Smith, DOJ" />
+        <div class="small muted">Matches entity names and aliases.</div>
       </div>
       <div>
         <label for="coverageFilter">Minimum doc coverage</label>
@@ -1233,6 +1241,7 @@ class EntityBrief(AddOn):
     const DOCS = DATA.documents || [];
 
     const kindFilter = document.getElementById("kindFilter");
+    const searchFilter = document.getElementById("searchFilter");
     const coverageFilter = document.getElementById("coverageFilter");
     const coverageValue = document.getElementById("coverageValue");
     const stoplistInput = document.getElementById("stoplist");
@@ -1261,7 +1270,8 @@ class EntityBrief(AddOn):
 
     function csvEscape(value) {{
       const str = value === null || value === undefined ? "" : String(value);
-      if (str.includes("\\\"") || str.includes(",") || str.includes("\\n")) {{
+      // Escape CSV fields that include quotes, commas, or real newlines.
+      if (str.includes('"') || str.includes(",") || str.includes("\\n")) {{
         return `"${{str.replace(/"/g, '""')}}"`;
       }}
       return str;
@@ -1345,6 +1355,7 @@ class EntityBrief(AddOn):
     }}
 
     function renderChart(entities) {{
+      // Render a simple SVG bar chart without external dependencies.
       const chartSvg = document.getElementById("barChart");
       if (!chartSvg) {{
         return;
@@ -1355,26 +1366,17 @@ class EntityBrief(AddOn):
         doc_count: d.doc_count,
         total_mentions: d.total_mentions
       }}));
-      const hasD3 = typeof d3 !== "undefined";
+
       const existingNote = document.getElementById("chartNote");
       if (existingNote) {{
         existingNote.remove();
       }}
-      if (!hasD3) {{
-        if (!demoChartFallback) {{
-          const note = document.createElement("p");
-          note.id = "chartNote";
-          note.className = "small muted";
-          note.textContent = "Chart could not render (D3 failed to load).";
-          chartSvg.insertAdjacentElement("beforebegin", note);
-        }}
-        return;
+
+      // Clear existing SVG content.
+      while (chartSvg.firstChild) {{
+        chartSvg.removeChild(chartSvg.firstChild);
       }}
-      if (demoChartFallback) {{
-        demoChartFallback.style.display = "none";
-      }}
-      const svg = d3.select(chartSvg);
-      svg.selectAll("*").remove();
+
       if (!top.length) {{
         const note = document.createElement("p");
         note.id = "chartNote";
@@ -1384,41 +1386,68 @@ class EntityBrief(AddOn):
         return;
       }}
 
-      const width = +svg.attr("width");
-      const height = +svg.attr("height");
+      if (demoChartFallback) {{
+        demoChartFallback.style.display = "none";
+      }}
+
+      const ns = "http://www.w3.org/2000/svg";
+      function svgEl(name, attrs) {{
+        const el = document.createElementNS(ns, name);
+        for (const [k, v] of Object.entries(attrs || {{}})) {{
+          el.setAttribute(k, String(v));
+        }}
+        return el;
+      }}
+
+      const width = parseInt(chartSvg.getAttribute("width") || "900", 10);
+      const height = parseInt(chartSvg.getAttribute("height") || "380", 10);
       const margin = {{top: 20, right: 20, bottom: 120, left: 60}};
-      const innerW = width - margin.left - margin.right;
-      const innerH = height - margin.top - margin.bottom;
+      const innerW = Math.max(10, width - margin.left - margin.right);
+      const innerH = Math.max(10, height - margin.top - margin.bottom);
+      const maxVal = Math.max(...top.map(d => d.doc_count || 0), 1);
 
-      const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
+      const g = svgEl("g", {{transform: `translate(${{margin.left}},${{margin.top}})`}});
+      chartSvg.appendChild(g);
 
-      const x = d3.scaleBand()
-        .domain(top.map(d => d.name))
-        .range([0, innerW])
-        .padding(0.15);
+      // Y axis + light grid.
+      const ticks = 6;
+      g.appendChild(svgEl("line", {{x1: 0, y1: 0, x2: 0, y2: innerH, stroke: "#333"}}));
+      for (let i = 0; i <= ticks; i++) {{
+        const value = (maxVal * i) / ticks;
+        const y = innerH - (value / maxVal) * innerH;
+        g.appendChild(svgEl("line", {{x1: 0, y1: y, x2: innerW, y2: y, stroke: "#eee"}}));
+        const label = svgEl("text", {{x: -8, y: y + 4, "text-anchor": "end", "font-size": "10", fill: "#333"}});
+        label.textContent = String(Math.round(value));
+        g.appendChild(label);
+      }}
 
-      const y = d3.scaleLinear()
-        .domain([0, d3.max(top, d => d.doc_count) || 1])
-        .nice()
-        .range([innerH, 0]);
+      // Bars.
+      const band = innerW / top.length;
+      const barW = Math.max(1, band * 0.8);
+      top.forEach((d, i) => {{
+        const x = i * band + (band - barW) / 2;
+        const h = (d.doc_count / maxVal) * innerH;
+        const y = innerH - h;
+        const rect = svgEl("rect", {{x, y, width: barW, height: h, fill: "#4e79a7"}});
+        const title = svgEl("title", {{}});
+        title.textContent = `${{d.name}} — docs: ${{d.doc_count}}`;
+        rect.appendChild(title);
+        g.appendChild(rect);
+      }});
 
-      g.append("g")
-        .attr("transform", `translate(0,${{innerH}})`)
-        .call(d3.axisBottom(x))
-        .selectAll("text")
-          .attr("transform", "rotate(-40)")
-          .style("text-anchor", "end");
-
-      g.append("g").call(d3.axisLeft(y).ticks(6));
-
-      g.selectAll("rect")
-        .data(top)
-        .enter()
-        .append("rect")
-          .attr("x", d => x(d.name))
-          .attr("y", d => y(d.doc_count))
-          .attr("width", x.bandwidth())
-          .attr("height", d => innerH - y(d.doc_count));
+      // X labels (rotated).
+      top.forEach((d, i) => {{
+        const x = i * band + band / 2;
+        const y = innerH + 10;
+        const full = String(d.name || "");
+        const labelText = full.length > 28 ? `${{full.slice(0, 25)}}…` : full;
+        const text = svgEl("text", {{x, y, transform: `rotate(-40 ${{x}} ${{y}})`, "text-anchor": "end", "font-size": "10", fill: "#333"}});
+        text.textContent = labelText;
+        const title = svgEl("title", {{}});
+        title.textContent = full;
+        text.appendChild(title);
+        g.appendChild(text);
+      }});
     }}
 
     function renderConnections(edges) {{
@@ -1596,6 +1625,8 @@ class EntityBrief(AddOn):
 
     function applyFilters() {{
       const kindValue = kindFilter ? kindFilter.value : "All";
+      const searchText = normalizeTerm(searchFilter ? searchFilter.value : "");
+      const searchTerms = searchText ? searchText.split(/\\s+/).filter(Boolean) : [];
       const minDocs = coverageFilter ? parseInt(coverageFilter.value || "1", 10) : 1;
       const stoplist = parseStoplist(stoplistInput ? stoplistInput.value : "");
       const stopTerms = Array.from(stoplist);
@@ -1615,6 +1646,12 @@ class EntityBrief(AddOn):
           }}
           const aliases = (ent.aliases || []).map(normalizeTerm);
           if (aliases.some(alias => stopTerms.some(term => alias.includes(term)))) {{
+            return false;
+          }}
+        }}
+        if (searchTerms.length) {{
+          const haystack = [normalizeTerm(ent.name), ...(ent.aliases || []).map(normalizeTerm)].join(" ");
+          if (!searchTerms.every(term => haystack.includes(term))) {{
             return false;
           }}
         }}
@@ -1666,6 +1703,16 @@ class EntityBrief(AddOn):
         }});
       }}
 
+      // Convenience: press Enter in the search box to apply filters.
+      if (searchFilter) {{
+        searchFilter.addEventListener("keydown", (e) => {{
+          if (e.key === "Enter") {{
+            e.preventDefault();
+            applyFilters();
+          }}
+        }});
+      }}
+
       if (applyFiltersBtn) {{
         applyFiltersBtn.addEventListener("click", (e) => {{
           e.preventDefault();
@@ -1677,6 +1724,9 @@ class EntityBrief(AddOn):
           e.preventDefault();
           if (kindFilter) {{
             kindFilter.value = "All";
+          }}
+          if (searchFilter) {{
+            searchFilter.value = "";
           }}
           if (coverageFilter) {{
             coverageFilter.value = "1";

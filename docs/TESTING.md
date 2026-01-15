@@ -38,7 +38,7 @@ script or test directly against that doc ID.
 - Unhandled API errors are listed under **Failures**.
 - Exactly one HTML report is returned via `upload_file()`.
 - Low entity coverage warning appears when too few docs have entities.
-- Filters and exports work in the HTML report (kind, coverage slider, stoplist, CSV/JSON downloads).
+- Filters and exports work in the HTML report (kind, search, coverage slider, stoplist, CSV/JSON downloads).
 - Connections include page-level examples when page data is available.
 - Support letter draft + feedback tools render (no external feedback form link).
 - Duplicate suggestions render when similar entities are detected.

@@ -1,7 +1,7 @@
 title: "Entity Brief"
 description: >
   <p><strong>Entity Brief</strong> builds a cross-document index of extracted entities (people, orgs, locations, dates)
-  and produces a single HTML report with simple visuals (D3) for investigative/FOIA workflows.</p>
+  and produces a single HTML report with simple visuals (self-contained SVG chart) for investigative/FOIA workflows.</p>
   <p><em>Privacy:</em> This version does not send document text, entity strings, or usage metrics outside DocumentCloud/GitHub Actions.</p>
 instructions: >
   <p><strong>Tip:</strong> For best results, run DocumentCloud's entity extraction first (if your documents do not have entities yet).</p>
